@@ -5,6 +5,7 @@ jobs:
     # Sources are TypeScript run via Node's native type stripping (default since Node 23.6 / 22.18).
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         node: [24, 26]
     steps:
@@ -14,11 +15,12 @@ jobs:
       - run: git config --global user.email ci@example.com && git config --global user.name ci
       - name: build output is committed and up to date
         run: node scripts/build.mjs && git diff --exit-code -- plugins/
-      - run: node --test test/
+      - run: node --test 'test/*.test.ts'
   built:
     # The engine users install is plain .mjs; verify it on the oldest supported Node too.
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         node: [20.17, 22, 24, 26]
     steps:
@@ -30,4 +32,4 @@ jobs:
         run: node plugins/duet/skills/duet/engine/bin/duet.mjs help
       - name: test suite against the built engine (needs type stripping for the test files themselves)
         if: matrix.node >= 24
-        run: DUET_TEST_BUILT=1 node --test test/
+        run: DUET_TEST_BUILT=1 node --test 'test/*.test.ts'

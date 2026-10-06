@@ -12,9 +12,9 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test test/",
-    "test:built": "node scripts/build.mjs && DUET_TEST_BUILT=1 node --test test/",
-    "check": "node scripts/build.mjs && git diff --exit-code -- plugins/ && node --test test/ && DUET_TEST_BUILT=1 node --test test/",
+    "test": "node --test 'test/*.test.ts'",
+    "test:built": "node scripts/build.mjs && DUET_TEST_BUILT=1 node --test 'test/*.test.ts'",
+    "check": "node scripts/build.mjs && git diff --exit-code -- plugins/ && node --test 'test/*.test.ts' && DUET_TEST_BUILT=1 node --test 'test/*.test.ts'",
     "install-local": "sh scripts/install.sh"
   },
   "license": "MIT",
