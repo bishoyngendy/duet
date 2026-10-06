@@ -64,7 +64,8 @@ export function exec(
 )                      {
   const started = Date.now();
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const piped = opts.input !== undefined;
+    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: [piped ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -85,7 +86,13 @@ export function exec(
       clearTimeout(timer);
       resolve({ code: code ?? -1, stdout, stderr, timedOut, durationMs: Date.now() - started });
     });
-    child.stdin.end(opts.input ?? '');
+    if (child.stdin) {
+      // A child may exit without reading its input (e.g. a fast failure); that EPIPE is not our error.
+      child.stdin.on('error', (err                       ) => {
+        if (err.code !== 'EPIPE') reject(err);
+      });
+      child.stdin.end(opts.input);
+    }
   });
 }
 
