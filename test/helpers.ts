@@ -3,13 +3,15 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Agent, AgentCall, AgentOutput } from '../src/agents/types.ts';
-import { loadConfig } from '../src/config.ts';
-import { advance, answer, locate, submit } from '../src/engine.ts';
 import type { Ctx, Step } from '../src/pipeline.ts';
 import type { Schema } from '../src/schema.ts';
 import type { AgentName } from '../src/schemas.ts';
-import { loadState, logEvent, newRunId, runDir, saveState, setCurrentRun } from '../src/state.ts';
-import { readJson, writeJson, writeText } from '../src/util.ts';
+import { config as configMod, engine, schemas, state as stateMod, util } from './impl.ts';
+
+const { loadConfig } = configMod;
+const { advance, answer, locate, submit } = engine;
+const { loadState, logEvent, newRunId, runDir, saveState, setCurrentRun } = stateMod;
+const { readJson, writeJson, writeText } = util;
 
 /** Minimal valid instance of a strict schema: nulls for nullables, first enum value, empty arrays. */
 export function fakeFromSchema(schema: Schema): any {
@@ -107,7 +109,7 @@ export async function drive(ctx: Ctx, hostScript: HostScript, gateScript: GateSc
     if (!step) throw new Error('no step but not done');
     visited.push(step.id);
     if (step.kind === 'host') {
-      const data = hostScript(step, fakeFromSchema((await import('../src/schemas.ts')).SCHEMAS[step.host!.schema]));
+      const data = hostScript(step, fakeFromSchema(schemas.SCHEMAS[step.host!.schema]));
       const file = join(ctx.dir, 'host', 'draft.json');
       writeJson(file, data);
       await submit(ctx, file);

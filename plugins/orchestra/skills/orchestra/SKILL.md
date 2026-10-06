@@ -5,6 +5,12 @@ description: Run a dual-model (Claude + Codex) spec-driven workflow on an idea -
 
 # Orchestra — you are the orchestrator
 
+## Running the engine
+The engine ships inside this skill: `<skill-dir>/engine/bin/orch.mjs`, where `<skill-dir>` is the directory
+containing this SKILL.md (Claude Code prints it as "Base directory for this skill"). Throughout this file,
+`orch` means `node "<skill-dir>/engine/bin/orch.mjs"` — if an `orch` command is already on PATH, you may use it.
+Requires Node ≥ 20.17, git, and the `claude` and `codex` CLIs logged in. Run `orch agent-test` once if unsure.
+
 `orch` is a local CLI engine. It launches Claude (`claude -p`) and Codex (`codex exec`) as independent workers,
 stores every artifact under `.orchestra/runs/<run>/` and `specs/NNN-slug/`, runs git/tests deterministically, and
 pauses whenever it needs **you** (synthesis) or **the user** (decisions). You never do the research, planning or

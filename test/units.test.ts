@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { bounceConflicts } from '../src/conflict.ts';
-import { DEFAULT_CONFIG } from '../src/config.ts';
-import { parseJsonLoose, validate } from '../src/schema.ts';
-import { SCHEMAS } from '../src/schemas.ts';
-import { topoSort } from '../src/util.ts';
+import { config, conflict, schema, schemas, util } from './impl.ts';
+
+const { bounceConflicts } = conflict;
+const { DEFAULT_CONFIG } = config;
+const { parseJsonLoose, validate } = schema;
+const { SCHEMAS } = schemas;
+const { topoSort } = util;
 import { fakeFromSchema } from './helpers.ts';
 
 test('every schema is strict (Codex structured-output compatible) and fakeable', () => {
@@ -62,7 +64,7 @@ test('topoSort orders dependencies and rejects cycles', () => {
 });
 
 test('per-role model/effort overrides fall back to agent defaults', async () => {
-  const { resolveAgent } = await import('../src/config.ts');
+  const { resolveAgent } = config;
   const cfg = { model: 'm', effort: 'high', roles: { scanner: { effort: 'medium' }, reviewer: { model: 'm2' } } };
   assert.deepEqual(resolveAgent(cfg, 'scanner'), { model: 'm', effort: 'medium' });
   assert.deepEqual(resolveAgent(cfg, 'reviewer'), { model: 'm2', effort: 'high' });

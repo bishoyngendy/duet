@@ -34,12 +34,38 @@ per feature, in dependency order, on a stacked branch + worktree:
 
 ## Install
 
+Requires Node ≥ 20.17, `git`, and the `claude` and `codex` CLIs logged in. Nothing to `npm install`: the engine is
+dependency-free and ships pre-built inside the skill.
+
+**Claude Code**
 ```sh
-sh scripts/install.sh      # links ~/.local/bin/orch and the skill into ~/.claude/skills and ~/.agents/skills
-orch agent-test            # both CLIs return schema-valid JSON and read-only is enforced
+claude plugin marketplace add <owner>/orchestra     # or a local path
+claude plugin install orchestra@orchestra
 ```
 
-Requires Node ≥ 24 (runs TypeScript natively, zero dependencies), `git`, `claude`, `codex`.
+**Codex CLI**
+```sh
+codex plugin marketplace add <owner>/orchestra      # or a local path
+codex plugin add orchestra@orchestra
+```
+
+The repo is both a Claude Code marketplace (`.claude-plugin/marketplace.json`) and a Codex marketplace
+(`.agents/plugins/marketplace.json`). Both point at `plugins/orchestra/`, which contains one skill with the engine
+bundled at `skills/orchestra/engine/`.
+
+Check the setup with `node <skill-dir>/engine/bin/orch.mjs agent-test`: both CLIs must return valid output, be able to run
+commands, and be unable to write in read-only mode.
+
+### Developing
+
+```sh
+sh scripts/install.sh   # dev: links ~/.local/bin/orch (runs src/*.ts directly) and the skill into both CLIs
+npm run build           # src/*.ts → plugins/orchestra/skills/orchestra/engine/**/*.mjs (Node's built-in type stripping)
+npm test                # suite against the sources (Node ≥ 22.18 / 23.6 for type stripping)
+npm run test:built      # same suite against the built engine
+```
+
+Commit the build output: plugin installs pull from git and run no build step. CI fails if it is stale.
 
 ## In a project
 
@@ -82,6 +108,5 @@ orch log | orch runs | orch use <run>
 
 ## Tests
 
-```sh
-npm test    # node:test — fake agents + scripted host drive the full pipeline in a real git repo
-```
+The suite uses `node:test`. Fake agents and a scripted host drive the full pipeline in real throwaway git repos,
+against both the sources and the built engine.

@@ -1,0 +1,33 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  source:
+    # Sources are TypeScript run via Node's native type stripping (default since Node 23.6 / 22.18).
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [24, 26]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ matrix.node }}' }
+      - run: git config --global user.email ci@example.com && git config --global user.name ci
+      - name: build output is committed and up to date
+        run: node scripts/build.mjs && git diff --exit-code -- plugins/
+      - run: node --test test/
+  built:
+    # The engine users install is plain .mjs; verify it on the oldest supported Node too.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20.17, 22, 24, 26]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ matrix.node }}' }
+      - run: git config --global user.email ci@example.com && git config --global user.name ci
+      - name: built engine CLI loads
+        run: node plugins/orchestra/skills/orchestra/engine/bin/orch.mjs help
+      - name: test suite against the built engine (needs type stripping for the test files themselves)
+        if: matrix.node >= 24
+        run: ORCH_TEST_BUILT=1 node --test test/

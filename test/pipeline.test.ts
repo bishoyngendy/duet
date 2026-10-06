@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { advance, answer, locate, submit } from '../src/engine.ts';
+import { engine, util } from './impl.ts';
 import { drive, FakeAgent, git, gitRepo, makeRun, readJson, type GateScript, type HostScript } from './helpers.ts';
-import { writeJson } from '../src/util.ts';
+
+const { advance, answer, locate, submit } = engine;
+const { writeJson } = util;
 
 const question = {
   id: 'Q1',

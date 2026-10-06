@@ -1,0 +1,17 @@
+{
+  "name": "orchestra",
+  "plugins": [
+    {
+      "name": "orchestra",
+      "source": {
+        "source": "local",
+        "path": "./plugins/orchestra"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
