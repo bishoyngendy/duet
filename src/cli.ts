@@ -8,22 +8,22 @@ import { advance, answer, costSummary, gateView, hostTaskView, locate, submit } 
 import { currentBranch, git, head, repoRoot } from './git.ts';
 import type { Ctx } from './pipeline.ts';
 import { SCHEMAS, type AgentName } from './schemas.ts';
-import { currentRunId, listRuns, loadState, logEvent, newRunId, orchDir, runDir, saveState, setCurrentRun, type RunState } from './state.ts';
+import { currentRunId, listRuns, loadState, logEvent, newRunId, duetDir, runDir, saveState, setCurrentRun, type RunState } from './state.ts';
 import { exists, fmtMs, readJson, readText, writeJson, writeText } from './util.ts';
 
-const HELP = `orch — Claude × Codex spec-driven orchestrator
+const HELP = `duet — Claude × Codex spec-driven orchestrator
 
 Usage:
-  orch init                         Scaffold .orchestra/ (config, constitution) in this repo
-  orch start "<idea>" [--depth quick|standard|deep] [--headless] [--no-run]
-  orch run [--headless]             Advance the current run until it needs the host or you
-  orch status [--json]              Where the run is, what's pending, cost so far
-  orch next [--json]                The pending host task (synthesis) or questions for you
-  orch submit <file.json>           Submit the host's synthesis for the pending step
-  orch answer Q1=A Q2="free text" [--accept-suggested] [--file answers.json]
-  orch log [-n 40]                  Recent events
-  orch runs                         List runs;  orch use <run-id> to switch
-  orch agent-test [--agent claude|codex]   Smoke-test both CLIs (schema output + read-only)
+  duet init                         Scaffold .duet/ (config, constitution) in this repo
+  duet start "<idea>" [--depth quick|standard|deep] [--headless] [--no-run]
+  duet run [--headless]             Advance the current run until it needs the host or you
+  duet status [--json]              Where the run is, what's pending, cost so far
+  duet next [--json]                The pending host task (synthesis) or questions for you
+  duet submit <file.json>           Submit the host's synthesis for the pending step
+  duet answer Q1=A Q2="free text" [--accept-suggested] [--file answers.json]
+  duet log [-n 40]                  Recent events
+  duet runs                         List runs;  duet use <run-id> to switch
+  duet agent-test [--agent claude|codex]   Smoke-test both CLIs (schema output + read-only)
 
 Common flags: --run <id> to target a specific run.
 `;
@@ -33,7 +33,7 @@ const stamp = () => new Date().toTimeString().slice(0, 8);
 async function context(runId?: string): Promise<Ctx> {
   const repo = await repoRoot(process.cwd());
   const id = runId ?? currentRunId(repo);
-  if (!id) throw new Error('No current run. Start one with: orch start "<idea>"');
+  if (!id) throw new Error('No current run. Start one with: duet start "<idea>"');
   const dir = runDir(repo, id);
   if (!exists(join(dir, 'state.json'))) throw new Error(`Run not found: ${id}`);
   const config = loadConfig(repo);
@@ -64,7 +64,7 @@ export async function main(argv: string[]): Promise<number> {
       return init(Boolean(v.force));
     case 'start': {
       const idea = pos.join(' ').trim();
-      if (!idea) throw new Error('Usage: orch start "<idea>"');
+      if (!idea) throw new Error('Usage: duet start "<idea>"');
       const ctx = await start(idea, (v.depth as Depth) ?? undefined);
       if (v['no-run']) return 0;
       return exitFor(await advance(ctx, { headless: v.headless }));
@@ -76,10 +76,10 @@ export async function main(argv: string[]): Promise<number> {
     case 'next':
       return next(await context(v.run), Boolean(v.json));
     case 'submit': {
-      if (!pos[0]) throw new Error('Usage: orch submit <file.json>');
+      if (!pos[0]) throw new Error('Usage: duet submit <file.json>');
       const ctx = await context(v.run);
       const step = await submit(ctx, pos[0]);
-      console.log(`✓ accepted ${step.id}. Continue with: orch run`);
+      console.log(`✓ accepted ${step.id}. Continue with: duet run`);
       return 0;
     }
     case 'answer': {
@@ -92,7 +92,7 @@ export async function main(argv: string[]): Promise<number> {
       }
       const answers = await answer(ctx, given, Boolean(v['accept-suggested']));
       for (const a of answers) console.log(`✓ ${a.id} → ${a.label}`);
-      console.log('Continue with: orch run');
+      console.log('Continue with: duet run');
       return 0;
     }
     case 'log': {
@@ -112,7 +112,7 @@ export async function main(argv: string[]): Promise<number> {
     }
     case 'use': {
       const repo = await repoRoot(process.cwd());
-      if (!pos[0] || !exists(runDir(repo, pos[0]))) throw new Error('Usage: orch use <run-id> (see orch runs)');
+      if (!pos[0] || !exists(runDir(repo, pos[0]))) throw new Error('Usage: duet use <run-id> (see duet runs)');
       setCurrentRun(repo, pos[0]);
       return 0;
     }
@@ -134,7 +134,7 @@ const exitFor = (s: RunState['status']) => (s === 'failed' ? 1 : 0);
 
 async function init(force: boolean): Promise<number> {
   const repo = await repoRoot(process.cwd());
-  const dir = orchDir(repo);
+  const dir = duetDir(repo);
   const cfgPath = join(dir, 'config.json');
   const constPath = join(dir, 'constitution.md');
   if (!exists(cfgPath) || force) {
@@ -146,23 +146,23 @@ async function init(force: boolean): Promise<number> {
     console.log(`wrote ${constPath}`);
   }
   const gi = join(repo, '.gitignore');
-  const lines = ['.orchestra/runs/', '.orchestra/current', '.orchestra/host/'];
+  const lines = ['.duet/runs/', '.duet/current', '.duet/host/'];
   const current = readText(gi);
   const missing = lines.filter((l) => !current.split('\n').includes(l));
   if (missing.length) {
-    writeText(gi, current + (current && !current.endsWith('\n') ? '\n' : '') + `# orchestra\n${missing.join('\n')}\n`);
+    writeText(gi, current + (current && !current.endsWith('\n') ? '\n' : '') + `# duet\n${missing.join('\n')}\n`);
     console.log('updated .gitignore');
   }
-  console.log('\nReview .orchestra/config.json (checks.setup / checks.commands) and .orchestra/constitution.md, then: orch start "<idea>"');
+  console.log('\nReview .duet/config.json (checks.setup / checks.commands) and .duet/constitution.md, then: duet start "<idea>"');
   return 0;
 }
 
 async function start(idea: string, depth?: Depth): Promise<Ctx> {
   const repo = await repoRoot(process.cwd());
-  if (!exists(join(orchDir(repo), 'config.json'))) await init(false);
+  if (!exists(join(duetDir(repo), 'config.json'))) await init(false);
   const config = loadConfig(repo);
   const dirty = await git(repo, 'status', '--porcelain');
-  if (dirty.split('\n').some((l) => l && !l.includes('.orchestra') && !l.endsWith('.gitignore'))) {
+  if (dirty.split('\n').some((l) => l && !l.includes('.duet') && !l.endsWith('.gitignore'))) {
     console.log('⚠ Working tree has uncommitted changes. Worktrees branch from HEAD, so those changes will NOT be visible to the agents.');
   }
   const id = newRunId(idea);
@@ -219,7 +219,7 @@ function status(ctx: Ctx, json: boolean): number {
   for (const f of features) console.log(`\n  ${f.id} ${f.title}\n     branch   ${f.branch}\n     worktree ${f.worktree}\n     specs    ${f.specDir}`);
   const costLine = Object.entries(costs).map(([a, c]) => `${a}: ${c.calls} calls, ${fmtMs(c.ms)}${c.cost ? `, $${c.cost.toFixed(2)}` : ''}`);
   if (costLine.length) console.log(`\nAgents   ${costLine.join(' · ')}`);
-  const hint = { needs_synthesis: 'orch next', needs_answers: 'orch next', idle: 'orch run', failed: 'orch run (after fixing the cause)', running: 'orch log', done: '' }[ctx.state.status];
+  const hint = { needs_synthesis: 'duet next', needs_answers: 'duet next', idle: 'duet run', failed: 'duet run (after fixing the cause)', running: 'duet log', done: '' }[ctx.state.status];
   if (hint) console.log(`\nNext     ${hint}`);
   return 0;
 }
@@ -236,7 +236,7 @@ function next(ctx: Ctx, json: boolean): number {
     else {
       console.log(`◆ HOST STEP: ${view.title}\n\n${view.instructions}\n\nInputs:`);
       for (const [k, p] of Object.entries(view.inputs)) console.log(`  ${k}: ${p}`);
-      console.log(`\nOutput schema: ${view.schema_path}\nWrite your JSON to: ${view.draft_path}\nThen: orch submit ${view.draft_path}`);
+      console.log(`\nOutput schema: ${view.schema_path}\nWrite your JSON to: ${view.draft_path}\nThen: duet submit ${view.draft_path}`);
     }
     return 0;
   }
@@ -252,11 +252,11 @@ function next(ctx: Ctx, json: boolean): number {
         if (q.codex) console.log(`    Codex  → ${q.codex.recommendation ?? '—'}: ${q.codex.rationale}`);
         console.log('');
       }
-      console.log(`Answer: orch answer ${view.questions.map((q) => `${q.id}=<key|text>`).join(' ')}  [--accept-suggested]`);
+      console.log(`Answer: duet answer ${view.questions.map((q) => `${q.id}=<key|text>`).join(' ')}  [--accept-suggested]`);
     }
     return 0;
   }
-  console.log(json ? JSON.stringify({ kind: 'engine', step: step.id, title: step.title }) : `● ${step.title} — engine work; run: orch run`);
+  console.log(json ? JSON.stringify({ kind: 'engine', step: step.id, title: step.title }) : `● ${step.title} — engine work; run: duet run`);
   return 0;
 }
 
@@ -265,7 +265,7 @@ async function agentTest(only?: AgentName): Promise<number> {
   const agents = createAgents(config);
   let failed = 0;
   for (const name of (only ? [only] : ['claude', 'codex']) as AgentName[]) {
-    const cwd = mkdtempSync(join(tmpdir(), `orch-test-${name}-`));
+    const cwd = mkdtempSync(join(tmpdir(), `duet-test-${name}-`));
     const started = Date.now();
     try {
       const res = await runAgent(agents[name], {

@@ -1,11 +1,11 @@
 {
-  "name": "orchestra",
+  "name": "duet",
   "plugins": [
     {
-      "name": "orchestra",
+      "name": "duet",
       "source": {
         "source": "local",
-        "path": "./plugins/orchestra"
+        "path": "./plugins/duet"
       },
       "policy": {
         "installation": "AVAILABLE",

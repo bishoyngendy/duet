@@ -18,8 +18,8 @@ export type RunState = {
   updated_at: string;
 };
 
-export const orchDir = (repo: string) => join(repo, '.orchestra');
-export const runsDir = (repo: string) => join(orchDir(repo), 'runs');
+export const duetDir = (repo: string) => join(repo, '.duet');
+export const runsDir = (repo: string) => join(duetDir(repo), 'runs');
 export const runDir = (repo: string, id: string) => join(runsDir(repo), id);
 
 export function newRunId(request: string, now = new Date()): string {
@@ -29,12 +29,12 @@ export function newRunId(request: string, now = new Date()): string {
 }
 
 export function currentRunId(repo: string): string | null {
-  const id = readText(join(orchDir(repo), 'current')).trim();
+  const id = readText(join(duetDir(repo), 'current')).trim();
   return id || null;
 }
 
 export function setCurrentRun(repo: string, id: string): void {
-  writeText(join(orchDir(repo), 'current'), id + '\n');
+  writeText(join(duetDir(repo), 'current'), id + '\n');
 }
 
 export function listRuns(repo: string): string[] {
@@ -54,7 +54,7 @@ export function logEvent(dir: string, event: Record<string, unknown>): void {
   appendLine(join(dir, 'events.jsonl'), JSON.stringify({ ts: new Date().toISOString(), ...event }));
 }
 
-/** Single-writer lock per run so two `orch run`s never advance the same run concurrently. */
+/** Single-writer lock per run so two `duet run`s never advance the same run concurrently. */
 export function acquireLock(dir: string): () => void {
   const p = join(dir, 'run.lock');
   if (exists(p)) {

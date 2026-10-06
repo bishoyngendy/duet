@@ -1,7 +1,7 @@
 // Tests run against the TypeScript sources by default, or against the built plugin engine
-// (plain .mjs) when ORCH_TEST_BUILT=1 — the same suite verifies what users actually install.
-const built = Boolean(process.env.ORCH_TEST_BUILT);
-const load = (m: string) => import(built ? `../plugins/orchestra/skills/orchestra/engine/src/${m}.mjs` : `../src/${m}.ts`);
+// (plain .mjs) when DUET_TEST_BUILT=1 — the same suite verifies what users actually install.
+const built = Boolean(process.env.DUET_TEST_BUILT);
+const load = (m: string) => import(built ? `../plugins/duet/skills/duet/engine/src/${m}.mjs` : `../src/${m}.ts`);
 
 export const config = await load('config');
 export const engine = await load('engine');

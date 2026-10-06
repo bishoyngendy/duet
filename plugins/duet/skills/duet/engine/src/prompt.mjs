@@ -8,7 +8,7 @@ export const promptPath = (name        ) => join(PROMPTS, `${name}.md`);
 export const loadPrompt = (name        ) => readFileSync(promptPath(name), 'utf8').trim();
 
 export function constitution(repo        )         {
-  return readText(join(repo, '.orchestra', 'constitution.md'), '(no constitution defined)').trim();
+  return readText(join(repo, '.duet', 'constitution.md'), '(no constitution defined)').trim();
 }
 
 /** Inputs are embedded verbatim so both models receive byte-identical context. */

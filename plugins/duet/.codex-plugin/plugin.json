@@ -1,5 +1,5 @@
 {
-  "name": "orchestra",
+  "name": "duet",
   "version": "0.1.0",
   "description": "Dual-model (Claude + Codex) spec-driven workflow: parallel research, clarifying questions, independent plans with rebuttal, adversarial plan challenge, task DAG, and alternating implement/review until converged.",
   "author": {
@@ -16,7 +16,7 @@
   ],
   "skills": "./skills/",
   "interface": {
-    "displayName": "Orchestra",
+    "displayName": "Duet",
     "shortDescription": "Claude × Codex spec-driven orchestration",
     "longDescription": "Dual-model (Claude + Codex) spec-driven workflow: parallel research, clarifying questions, independent plans with rebuttal, adversarial plan challenge, task DAG, and alternating implement/review until converged.",
     "developerName": "Bishoy Gendy",
@@ -27,7 +27,11 @@
       "Write"
     ],
     "defaultPrompt": [
-      "$orchestra add a slugify utility with Unicode support"
-    ]
-  }
+      "$duet add a slugify utility with Unicode support"
+    ],
+    "websiteURL": "https://github.com/bishoyngendy/duet"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/bishoyngendy/duet",
+  "repository": "https://github.com/bishoyngendy/duet"
 }

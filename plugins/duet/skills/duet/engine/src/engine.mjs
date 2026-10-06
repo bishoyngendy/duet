@@ -44,13 +44,13 @@ export async function advance(ctx     , opts                                    
       if (step.kind === 'user') {
         setStatus(ctx, 'needs_answers', step);
         logEvent(ctx.dir, { type: 'gate', step: step.id });
-        ctx.print(`⏸ ${step.title} — waiting for your answers (orch next)`);
+        ctx.print(`⏸ ${step.title} — waiting for your answers (duet next)`);
         return 'needs_answers';
       }
       if (step.kind === 'host' && !opts.headless) {
         setStatus(ctx, 'needs_synthesis', step);
         logEvent(ctx.dir, { type: 'host', step: step.id });
-        ctx.print(`⏸ ${step.title} — waiting for the orchestrator session (orch next)`);
+        ctx.print(`⏸ ${step.title} — waiting for the orchestrator session (duet next)`);
         return 'needs_synthesis';
       }
       setStatus(ctx, 'running', step);
@@ -66,7 +66,7 @@ export async function advance(ctx     , opts                                    
     const { step } = safeLocate(ctx);
     setStatus(ctx, 'failed', step, message);
     logEvent(ctx.dir, { type: 'failed', step: step?.id, message });
-    ctx.print(`✖ ${message}\n  Fix the cause and run \`orch run\` again — completed work is kept.`);
+    ctx.print(`✖ ${message}\n  Fix the cause and run \`duet run\` again — completed work is kept.`);
     return 'failed';
   } finally {
     release();

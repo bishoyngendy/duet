@@ -71,11 +71,11 @@ function merge   (base   , over     )    {
 }
 
 export function loadConfig(repo        )         {
-  const p = join(repo, '.orchestra', 'config.json');
+  const p = join(repo, '.duet', 'config.json');
   return exists(p) ? merge(DEFAULT_CONFIG, readJson(p)) : DEFAULT_CONFIG;
 }
 
-/** Best-effort detection of install/test commands for `orch init`. */
+/** Best-effort detection of install/test commands for `duet init`. */
 export function detectChecks(repo        )                   {
   const checks                   = { setup: null, commands: [], timeout_minutes: 20 };
   const pkgPath = join(repo, 'package.json');

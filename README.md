@@ -1,19 +1,19 @@
-# orchestra
+# duet
 
 Claude Code × Codex CLI, spec-driven. One idea in → independently researched, clarified, planned, challenged,
 implemented and cross-reviewed features out, with every artifact on disk.
 
 ```
-/orchestra "add checkpoint reminders"        (Claude Code)
-$orchestra "add checkpoint reminders"        (Codex)
+/duet "add checkpoint reminders"        (Claude Code)
+$duet "add checkpoint reminders"        (Codex)
 ```
 
 ## How it works
 
-- **`orch`** (this repo) is a deterministic engine: state, worker launching (`claude -p`, `codex exec`), git
+- **`duet`** (this repo) is a deterministic engine: state, worker launching (`claude -p`, `codex exec`), git
   worktrees, running checks, schema validation. It never synthesizes or decides.
 - **Your session is the orchestrator.** When synthesis is needed the engine pauses (`needs_synthesis`); the
-  `/orchestra` skill has the session read both models' outputs, write the merge, and `orch submit` it.
+  `/duet` skill has the session read both models' outputs, write the merge, and `duet submit` it.
 - **You decide** anything non-minor. Conflicts in requirements / architecture / security / constitution are always
   escalated to you, even if the host marked them resolved (bias guard — the host is one of the two models).
 
@@ -39,28 +39,28 @@ dependency-free and ships pre-built inside the skill.
 
 **Claude Code**
 ```sh
-claude plugin marketplace add <owner>/orchestra     # or a local path
-claude plugin install orchestra@orchestra
+claude plugin marketplace add bishoyngendy/duet     # or a local path
+claude plugin install duet@duet
 ```
 
 **Codex CLI**
 ```sh
-codex plugin marketplace add <owner>/orchestra      # or a local path
-codex plugin add orchestra@orchestra
+codex plugin marketplace add bishoyngendy/duet      # or a local path
+codex plugin add duet@duet
 ```
 
 The repo is both a Claude Code marketplace (`.claude-plugin/marketplace.json`) and a Codex marketplace
-(`.agents/plugins/marketplace.json`). Both point at `plugins/orchestra/`, which contains one skill with the engine
-bundled at `skills/orchestra/engine/`.
+(`.agents/plugins/marketplace.json`). Both point at `plugins/duet/`, which contains one skill with the engine
+bundled at `skills/duet/engine/`.
 
-Check the setup with `node <skill-dir>/engine/bin/orch.mjs agent-test`: both CLIs must return valid output, be able to run
+Check the setup with `node <skill-dir>/engine/bin/duet.mjs agent-test`: both CLIs must return valid output, be able to run
 commands, and be unable to write in read-only mode.
 
 ### Developing
 
 ```sh
-sh scripts/install.sh   # dev: links ~/.local/bin/orch (runs src/*.ts directly) and the skill into both CLIs
-npm run build           # src/*.ts → plugins/orchestra/skills/orchestra/engine/**/*.mjs (Node's built-in type stripping)
+sh scripts/install.sh   # dev: links ~/.local/bin/duet (runs src/*.ts directly) and the skill into both CLIs
+npm run build           # src/*.ts → plugins/duet/skills/duet/engine/**/*.mjs (Node's built-in type stripping)
 npm test                # suite against the sources (Node ≥ 22.18 / 23.6 for type stripping)
 npm run test:built      # same suite against the built engine
 ```
@@ -70,7 +70,7 @@ Commit the build output: plugin installs pull from git and run no build step. CI
 ## In a project
 
 ```sh
-orch init     # .orchestra/config.json (models, checks, protected paths) + constitution.md
+duet init     # .duet/config.json (models, checks, protected paths) + constitution.md
 ```
 
 Edit `checks.setup` (e.g. `pnpm install --frozen-lockfile`, run in each fresh worktree) and `checks.commands`
@@ -83,25 +83,25 @@ Other useful settings in `config.json`:
 - `review.polish` (default `low`) and `review.polish_rounds` (default `1`) control the polish round: when a review approves with these findings, the implementer addresses or disputes them in one extra round.
 - `escalate_categories` lists conflict categories the host may never settle on its own.
 
-Read-only roles can run commands (tests, probes) but can't write: Claude runs inside Claude Code's OS sandbox with the working tree write-denied, and Codex runs with `-s read-only`. Reviewers are also checked against a before/after snapshot of the worktree. `orch agent-test` verifies both properties.
+Read-only roles can run commands (tests, probes) but can't write: Claude runs inside Claude Code's OS sandbox with the working tree write-denied, and Codex runs with `-s read-only`. Reviewers are also checked against a before/after snapshot of the worktree. `duet agent-test` verifies both properties.
 
 | Path | What | Git |
 |---|---|---|
 | `specs/NNN-slug/{spec,plan,tasks,research,decisions,report}.md` | human artifacts | committed on the feature branch |
-| `.orchestra/config.json`, `constitution.md` | project settings | commit them |
-| `.orchestra/runs/<run>/` | state, events, per-model JSON, raw agent I/O | ignored |
-| `~/.orchestra/worktrees/…` | one worktree per feature | — |
+| `.duet/config.json`, `constitution.md` | project settings | commit them |
+| `.duet/runs/<run>/` | state, events, per-model JSON, raw agent I/O | ignored |
+| `~/.duet/worktrees/…` | one worktree per feature | — |
 
 ## CLI
 
 ```
-orch start "<idea>" [--depth quick|standard|deep] [--headless]
-orch run [--headless]          advance until host/user is needed (re-run after any failure; nothing is redone)
-orch status [--json]
-orch next [--json]             pending synthesis task or questions
-orch submit <draft.json>
-orch answer Q1=B Q2="free text" [--accept-suggested]
-orch log | orch runs | orch use <run>
+duet start "<idea>" [--depth quick|standard|deep] [--headless]
+duet run [--headless]          advance until host/user is needed (re-run after any failure; nothing is redone)
+duet status [--json]
+duet next [--json]             pending synthesis task or questions
+duet submit <draft.json>
+duet answer Q1=B Q2="free text" [--accept-suggested]
+duet log | duet runs | duet use <run>
 ```
 
 `--headless` lets `synthesizer_fallback` (default claude) do host steps, for unattended runs; question gates still wait for you.

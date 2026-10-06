@@ -53,14 +53,14 @@ export class FakeAgent implements Agent {
 }
 
 export function gitRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'orch-e2e-'));
+  const dir = mkdtempSync(join(tmpdir(), 'duet-e2e-'));
   const g = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
   g('init', '-q', '-b', 'main');
   g('config', 'user.email', 'test@example.com');
   g('config', 'user.name', 'Test');
   mkdirSync(join(dir, 'src'));
   writeFileSync(join(dir, 'src', 'index.ts'), 'export const x = 1;\n');
-  writeFileSync(join(dir, '.gitignore'), '.orchestra/runs/\n.orchestra/current\n');
+  writeFileSync(join(dir, '.gitignore'), '.duet/runs/\n.duet/current\n');
   g('add', '-A');
   g('commit', '-q', '-m', 'init');
   return dir;
@@ -73,7 +73,7 @@ export function git(dir: string, ...args: string[]): string {
 export function makeRun(repo: string, agents: Record<AgentName, Agent>, opts: { depth?: 'quick' | 'standard' | 'deep'; config?: any } = {}): Ctx {
   const config = { ...loadConfig(repo), ...(opts.config ?? {}) };
   config.checks = { setup: null, commands: ['true'], timeout_minutes: 1, ...(opts.config?.checks ?? {}) };
-  config.worktrees_dir = mkdtempSync(join(tmpdir(), 'orch-wt-'));
+  config.worktrees_dir = mkdtempSync(join(tmpdir(), 'duet-wt-'));
   const id = newRunId('test idea');
   const dir = runDir(repo, id);
   const now = new Date().toISOString();

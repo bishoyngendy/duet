@@ -1,6 +1,6 @@
 # Engineering Constitution
 
-Every orchestra agent (researcher, planner, implementer, reviewer) receives this file. Edit it to encode how
+Every duet agent (researcher, planner, implementer, reviewer) receives this file. Edit it to encode how
 YOU want software built in this repository. Repository instructions in CLAUDE.md / AGENTS.md still apply.
 
 ## Architecture

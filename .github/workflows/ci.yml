@@ -27,7 +27,7 @@ jobs:
         with: { node-version: '${{ matrix.node }}' }
       - run: git config --global user.email ci@example.com && git config --global user.name ci
       - name: built engine CLI loads
-        run: node plugins/orchestra/skills/orchestra/engine/bin/orch.mjs help
+        run: node plugins/duet/skills/duet/engine/bin/duet.mjs help
       - name: test suite against the built engine (needs type stripping for the test files themselves)
         if: matrix.node >= 24
-        run: ORCH_TEST_BUILT=1 node --test test/
+        run: DUET_TEST_BUILT=1 node --test test/
