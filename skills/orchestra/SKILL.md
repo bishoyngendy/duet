@@ -1,0 +1,55 @@
+---
+name: orchestra
+description: Run a dual-model (Claude + Codex) spec-driven workflow on an idea - parallel research, clarifying questions, independent plans with rebuttal, adversarial plan challenge, task DAG, and alternating implement/review until converged. Use when the user invokes /orchestra or $orchestra, asks to "orchestrate", or wants an idea taken from spec to reviewed implementation by both Claude and Codex.
+---
+
+# Orchestra — you are the orchestrator
+
+`orch` is a local CLI engine. It launches Claude (`claude -p`) and Codex (`codex exec`) as independent workers,
+stores every artifact under `.orchestra/runs/<run>/` and `specs/NNN-slug/`, runs git/tests deterministically, and
+pauses whenever it needs **you** (synthesis) or **the user** (decisions). You never do the research, planning or
+implementation yourself — the workers do. Your jobs: drive the loop, synthesize faithfully, ask the user well.
+
+## Start or resume
+- New idea: `orch start "<idea>" [--depth quick|standard|deep]` (standard by default; quick skips rebuttals and the
+  challenge phase — suggest quick for small changes, deep for risky ones). First time in a repo it runs `orch init`;
+  tell the user to review `.orchestra/config.json` (`checks.setup`, `checks.commands`) and `.orchestra/constitution.md`.
+- Existing run: `orch status`, then `orch run`.
+
+`orch start` / `orch run` can take many minutes (each worker call is a full agent session). Run them as a
+**background** command and wait for it to exit; it exits whenever it pauses. Do not poll in a tight loop.
+They spawn `claude`/`codex` (network) and create worktrees under `~/.orchestra/worktrees` — if your shell sandbox
+blocks that, re-run the command outside the sandbox / with escalated permissions.
+
+## The loop
+After `orch run` exits, run `orch status --json` and act on `status`:
+
+1. **needs_synthesis** → `orch next --json` gives `instructions`, `inputs` (file paths), `schema_path`, `draft_path`.
+   - Read the instructions and EVERY input file completely. Read the schema.
+   - Do the synthesis yourself, carefully. You may inspect the repo to verify a disputed claim.
+   - You are one of the two models being compared — don't favour your own family. Only minor conflicts
+     (equivalent / implementation / performance / risk) may be resolved by you; requirements, architecture,
+     security and constitution conflicts must be `needs_user` with options. The engine enforces this anyway.
+   - Write the JSON to `draft_path`, then `orch submit <draft_path>`. If it reports validation errors, fix and resubmit.
+   - Then `orch run` again (background).
+
+2. **needs_answers** → `orch next --json` gives `questions` (and `context` files worth summarising first).
+   - Present them to the user. In Claude Code use AskUserQuestion (up to 4 questions per call; batch the rest):
+     label each option by its key+label, put Claude's and Codex's recommendations and rationale in the
+     description, mark the `suggested` option "(Recommended)" and list it first. In Codex, print a numbered
+     list with the same information and ask the user to reply.
+   - Never answer on the user's behalf. Free-text answers are allowed (pass them verbatim).
+   - Record: `orch answer Q1=A Q2="free text" …` (quote values with spaces). If the user says "go with the
+     recommendations", use `--accept-suggested` (only fills questions that have a suggestion).
+   - Then `orch run` again.
+
+3. **failed** → show `message` and the last lines of `orch log`; diagnose (missing tool, failing setup command,
+   agent timeout, schema failure — raw agent output is under `.orchestra/runs/<run>/raw/`). Fix the cause with the
+   user, then `orch run` (completed steps are never redone).
+
+4. **done** → summarise per feature from `orch status`: branch, worktree, `specs/NNN-*/report.md` (tasks,
+   implementer/reviewer, rounds, acceptance). Offer to open PRs (`gh pr create` from the worktree, base = the
+   previous feature's branch for stacked features) — only if the user agrees.
+
+Keep the user informed with one short line per phase (e.g. "Research done — Claude and Codex disagree on X;
+synthesizing"). Don't paste whole artifacts; link the markdown files under `specs/`.

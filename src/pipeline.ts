@@ -1,0 +1,798 @@
+// The workflow, expressed as a generator of steps. Every step's completion is derived from artifacts
+// on disk, so the "current position" is always recomputed: resuming after a crash is just running again.
+
+import { existsSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { other, runAgent, type Agents } from './agents/index.ts';
+import type { Role } from './agents/types.ts';
+import { bounceConflicts } from './conflict.ts';
+import { runChecks, type CheckResult } from './checks.ts';
+import type { Config } from './config.ts';
+import { addWorktree, commitAll, diff, git, head, restore, snapshot, worktreePath } from './git.ts';
+import { hostInstructions, workerPrompt } from './prompt.ts';
+import * as render from './render.ts';
+import { SCHEMAS, type AgentName, type Answer, type Feature, type MergedQ, type Task } from './schemas.ts';
+import { logEvent, type RunState } from './state.ts';
+import { appendLine, exists, fmtMs, readJson, readText, sh, tail, topoSort, writeJson, writeText } from './util.ts';
+
+export type Ctx = {
+  repo: string;
+  dir: string;
+  config: Config;
+  state: RunState;
+  agents: Agents;
+  print: (line: string) => void;
+};
+
+export type HostTask = {
+  instructions: string;
+  inputs: Record<string, string>;
+  schema: string;
+  output: string;
+  /** Semantic validation / normalisation; throw to reject a submission. */
+  postprocess?: (data: any) => any;
+  after?: (data: any) => void | Promise<void>;
+};
+
+export type Gate = {
+  context: string[];
+  questions: MergedQ[];
+  output: string;
+  after?: (answers: Answer[]) => void | Promise<void>;
+};
+
+export type Step = {
+  id: string;
+  title: string;
+  kind: 'worker' | 'deterministic' | 'host' | 'user';
+  done: () => boolean;
+  run?: () => Promise<void>;
+  host?: HostTask;
+  gate?: Gate;
+};
+
+
+// ───────────────────────────── step helpers ─────────────────────────────
+
+const label = (id: string) => id.replace(/[^\w.-]+/g, '__');
+
+async function callAgent(
+  ctx: Ctx,
+  agent: AgentName,
+  o: { stepId: string; role: Role; prompt: string; cwd: string; writable: boolean; schema: string },
+): Promise<any> {
+  ctx.print(`    ${agent} ▸ ${o.role}…`);
+  const res = await runAgent(ctx.agents[agent], {
+    role: o.role,
+    prompt: o.prompt,
+    cwd: o.cwd,
+    writable: o.writable,
+    schema: SCHEMAS[o.schema],
+    rawDir: join(ctx.dir, 'raw'),
+    label: `${label(o.stepId)}.${agent}`,
+    timeoutMs: ctx.config.timeout_minutes * 60_000,
+  });
+  logEvent(ctx.dir, { type: 'agent', step: o.stepId, agent, role: o.role, duration_ms: res.durationMs, cost_usd: res.costUsd, attempts: res.attempts });
+  ctx.print(`    ${agent} ✓ ${o.role} (${fmtMs(res.durationMs)}${res.costUsd ? `, $${res.costUsd.toFixed(2)}` : ''})`);
+  return res.output;
+}
+
+/** The same prompt-shaped job for both models, in parallel; only missing outputs are (re)run. */
+function both(
+  ctx: Ctx,
+  o: { id: string; title: string; role: Role; schema: string; cwd: string; out: (a: AgentName) => string; prompt: (a: AgentName) => string },
+): Step {
+  return {
+    id: o.id,
+    title: o.title,
+    kind: 'worker',
+    done: () => exists(o.out('claude')) && exists(o.out('codex')),
+    run: async () => {
+      const todo = (['claude', 'codex'] as const).filter((a) => !exists(o.out(a)));
+      const results = await Promise.allSettled(
+        todo.map(async (a) => {
+          const output = await callAgent(ctx, a, { stepId: o.id, role: o.role, prompt: o.prompt(a), cwd: o.cwd, writable: false, schema: o.schema });
+          writeJson(o.out(a), output);
+        }),
+      );
+      const failed = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+      if (failed.length) throw new Error(failed.map((f) => (f.reason as Error).message).join('\n'));
+    },
+  };
+}
+
+function host(id: string, title: string, task: HostTask): Step {
+  return { id, title, kind: 'host', done: () => exists(task.output), host: task };
+}
+
+function gate(id: string, title: string, g: Gate): Step {
+  return { id, title, kind: 'user', done: () => exists(g.output), gate: g };
+}
+
+function det(id: string, title: string, marker: string, run: () => Promise<unknown>): Step {
+  return {
+    id,
+    title,
+    kind: 'deterministic',
+    done: () => exists(marker),
+    run: async () => {
+      const result = await run();
+      writeJson(marker, result ?? { ok: true });
+    },
+  };
+}
+
+const option = (key: string, label: string, description: string) => ({ key, label, description });
+
+function singleQuestion(id: string, text: string, options: ReturnType<typeof option>[], suggested: string | null): MergedQ {
+  return { id, text, category: 'other', blocking: true, affects: [], options, claude: null, codex: null, status: 'single', suggested };
+}
+
+const choiceOf = (path: string, qid: string): string => (readJson(path).answers as Answer[]).find((a) => a.id === qid)?.choice ?? '';
+
+// ───────────────────────────── pipeline ─────────────────────────────
+
+export function* pipeline(ctx: Ctx): Generator<Step> {
+  const D = ctx.dir;
+  const request = join(D, 'request.md');
+
+  yield both(ctx, {
+    id: 'scan',
+    title: 'Codebase scan (Claude ∥ Codex)',
+    role: 'scanner',
+    schema: 'Scan',
+    cwd: ctx.repo,
+    out: (a) => join(D, `scan.${a}.json`),
+    prompt: () => workerPrompt('scanner', ctx.repo, { request: readText(request) }),
+  });
+
+  yield* decompose(ctx);
+
+  const features = topoSort(readJson<{ features: Feature[] }>(join(D, 'decomposition.json')).features);
+  let prev: Feature | null = null;
+  for (const f of features) {
+    yield* feature(ctx, f, prev);
+    prev = f;
+  }
+}
+
+function* decompose(ctx: Ctx): Generator<Step> {
+  const D = ctx.dir;
+  const out = join(D, 'decomposition.json');
+  const feedback = join(D, 'decompose-feedback.md');
+  yield host('decompose', 'Decompose request into features', {
+    instructions: hostInstructions('decompose'),
+    inputs: {
+      request: join(D, 'request.md'),
+      scan_claude: join(D, 'scan.claude.json'),
+      scan_codex: join(D, 'scan.codex.json'),
+      ...(exists(feedback) ? { user_feedback_on_previous_split: feedback } : {}),
+    },
+    schema: 'Decomposition',
+    output: out,
+    postprocess: (d) => {
+      if (!d.features.length) throw new Error('At least one feature is required');
+      const ids = new Set<string>();
+      for (const f of d.features) {
+        if (ids.has(f.id)) throw new Error(`Duplicate feature id ${f.id}`);
+        ids.add(f.id);
+        if (!/^[a-z0-9-]+$/.test(f.slug)) throw new Error(`Slug "${f.slug}" must be kebab-case`);
+      }
+      topoSort(d.features);
+      return d;
+    },
+    after: (d) => writeText(join(D, 'decomposition.md'), render.renderDecomposition(d)),
+  });
+
+  const approval = join(D, 'decomposition.approval.json');
+  yield gate('decompose-approve', 'Approve feature split', {
+    context: [join(D, 'decomposition.md')],
+    questions: [
+      singleQuestion(
+        'SPLIT',
+        'Approve this feature split? (see decomposition.md) — or answer with free-text feedback to redo it',
+        [option('approve', 'Approve', 'Proceed feature by feature in dependency order')],
+        'approve',
+      ),
+    ],
+    output: approval,
+    after: (answers) => {
+      const a = answers[0];
+      if (a.choice === 'approve') return;
+      const n = readdirSync(D).filter((f) => f.startsWith('decomposition.rejected')).length + 1;
+      renameSync(out, join(D, `decomposition.rejected-${n}.json`));
+      appendLine(feedback, `- Split #${n} rejected: ${a.choice}`);
+      rmSync(approval);
+    },
+  });
+}
+
+type FeatureMeta = { id: string; title: string; slug: string; number: string; branch: string; worktree: string; base: string; specDir: string };
+
+function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
+  const FD = join(ctx.dir, 'features', f.id);
+  const p = (name: string) => join(FD, name);
+  const depth = ctx.state.depth;
+  const quick = depth === 'quick';
+
+  // ── setup: stacked worktree/branch, spec number, dependency install
+  yield det(`${f.id}/setup`, `${f.id}: create worktree`, p('feature.json'), async () => {
+    const base = prev ? (readJson<FeatureMeta>(join(ctx.dir, 'features', prev.id, 'feature.json')).branch) : ctx.state.base_commit;
+    const baseSha = await git(ctx.repo, 'rev-parse', base);
+    const wt = worktreePath(ctx.repo, ctx.config.worktrees_dir, ctx.state.id, f.id);
+    const branch = `orchestra/${ctx.state.id}/${f.id}-${f.slug}`;
+    if (!existsSync(wt)) await addWorktree(ctx.repo, wt, branch, baseSha);
+    const specsRoot = join(wt, 'specs');
+    const used = existsSync(specsRoot) ? readdirSync(specsRoot).map((n) => Number(n.match(/^(\d{3})-/)?.[1] ?? 0)) : [];
+    const number = String(Math.max(0, ...used) + 1).padStart(3, '0');
+    if (ctx.config.checks.setup) {
+      ctx.print(`    setup: ${ctx.config.checks.setup}`);
+      const res = await sh(ctx.config.checks.setup, wt, ctx.config.checks.timeout_minutes * 60_000);
+      if (res.code !== 0) throw new Error(`Setup command failed in ${wt}:\n${tail(res.stdout + res.stderr, 2000)}`);
+    }
+    const meta: FeatureMeta = { id: f.id, title: f.title, slug: f.slug, number, branch, worktree: wt, base: baseSha, specDir: join(specsRoot, `${number}-${f.slug}`) };
+    return meta;
+  });
+  const meta = readJson<FeatureMeta>(p('feature.json'));
+  const wt = meta.worktree;
+  const md = (name: string, content: string) => writeText(join(meta.specDir, name), content);
+  const ctxInputs = () => ({ request: readText(join(ctx.dir, 'request.md')), feature: f, codebase_scans: { claude: readJson(join(ctx.dir, 'scan.claude.json')), codex: readJson(join(ctx.dir, 'scan.codex.json')) } });
+
+  // ── research: independent → rebuttal → host synthesis
+  yield both(ctx, {
+    id: `${f.id}/research`,
+    title: `${f.id}: research (Claude ∥ Codex)`,
+    role: 'researcher',
+    schema: 'Research',
+    cwd: wt,
+    out: (a) => p(`research.${a}.json`),
+    prompt: () => workerPrompt('researcher', ctx.repo, ctxInputs()),
+  });
+  if (!quick) {
+    yield both(ctx, {
+      id: `${f.id}/research-rebuttal`,
+      title: `${f.id}: research rebuttal`,
+      role: 'rebutter',
+      schema: 'Rebuttal',
+      cwd: wt,
+      out: (a) => p(`research-rebuttal.${a}.json`),
+      prompt: (a) => workerPrompt('rebutter', ctx.repo, { feature: f, your_output: readJson(p(`research.${a}.json`)), their_output: readJson(p(`research.${other(a)}.json`)) }),
+    });
+  }
+  yield host(`${f.id}/research-synthesis`, `${f.id}: synthesize research`, {
+    instructions: hostInstructions('research'),
+    inputs: pick({
+      feature_decomposition: join(ctx.dir, 'decomposition.json'),
+      research_claude: p('research.claude.json'),
+      research_codex: p('research.codex.json'),
+      rebuttal_claude: quick ? null : p('research-rebuttal.claude.json'),
+      rebuttal_codex: quick ? null : p('research-rebuttal.codex.json'),
+    }),
+    schema: 'ResearchSynthesis',
+    output: p('research.json'),
+    after: (d) => md('research.md', render.renderResearch(d)),
+  });
+
+  // ── clarification rounds
+  const maxRounds = ctx.config.max_clarify_rounds[depth];
+  const answered: { round: number; questions: MergedQ[]; answers: Answer[] }[] = [];
+  for (let r = 1; r <= maxRounds; r++) {
+    const prior = [...answered];
+    yield both(ctx, {
+      id: `${f.id}/clarify-${r}`,
+      title: `${f.id}: clarifying questions, round ${r}`,
+      role: 'questioner',
+      schema: 'Questions',
+      cwd: wt,
+      out: (a) => p(`clarify-${r}.${a}.json`),
+      prompt: () => workerPrompt('questioner', ctx.repo, { ...ctxInputs(), research: readJson(p('research.json')), previous_answers: prior }),
+    });
+    yield host(`${f.id}/clarify-${r}-merge`, `${f.id}: merge questions, round ${r}`, {
+      instructions: hostInstructions('clarify'),
+      inputs: { questions_claude: p(`clarify-${r}.claude.json`), questions_codex: p(`clarify-${r}.codex.json`), research: p('research.json'), ...answerInputs(FD, r) },
+      schema: 'MergedQuestions',
+      output: p(`questions-${r}.json`),
+      postprocess: (d) => normalizeQuestions(d),
+    });
+    const qs = readJson<{ questions: MergedQ[] }>(p(`questions-${r}.json`)).questions;
+    if (!qs.length) break;
+    yield gate(`${f.id}/clarify-${r}-answers`, `${f.id}: answer clarifying questions (round ${r})`, {
+      context: [join(meta.specDir, 'research.md')],
+      questions: qs,
+      output: p(`answers-${r}.json`),
+      after: () => renderDecisionsMd(FD, meta),
+    });
+    answered.push({ round: r, questions: qs, answers: readJson(p(`answers-${r}.json`)).answers });
+  }
+
+  // ── spec
+  yield host(`${f.id}/specify`, `${f.id}: write spec`, {
+    instructions: hostInstructions('specify'),
+    inputs: { request: join(ctx.dir, 'request.md'), decomposition: join(ctx.dir, 'decomposition.json'), research: p('research.json'), ...answerInputs(FD) },
+    schema: 'Spec',
+    output: p('spec.json'),
+    after: (d) => md('spec.md', render.renderSpec(d)),
+  });
+  const planInputs = () => ({ feature: f, spec: readJson(p('spec.json')), research: readJson(p('research.json')), decisions: allAnswers(FD) });
+
+  // ── plan: independent → rebuttal → host synthesis (+ escalated decisions)
+  yield both(ctx, {
+    id: `${f.id}/plan`,
+    title: `${f.id}: plan (Claude ∥ Codex)`,
+    role: 'planner',
+    schema: 'Plan',
+    cwd: wt,
+    out: (a) => p(`plan.${a}.json`),
+    prompt: () => workerPrompt('planner', ctx.repo, planInputs()),
+  });
+  if (!quick) {
+    yield both(ctx, {
+      id: `${f.id}/plan-rebuttal`,
+      title: `${f.id}: plan rebuttal`,
+      role: 'rebutter',
+      schema: 'Rebuttal',
+      cwd: wt,
+      out: (a) => p(`plan-rebuttal.${a}.json`),
+      prompt: (a) => workerPrompt('rebutter', ctx.repo, { spec: readJson(p('spec.json')), your_output: readJson(p(`plan.${a}.json`)), their_output: readJson(p(`plan.${other(a)}.json`)) }),
+    });
+  }
+  yield* decided(ctx, FD, meta, {
+    id: `${f.id}/plan-synthesis`,
+    title: `${f.id}: synthesize plan`,
+    instructions: hostInstructions('plan'),
+    inputs: pick({
+      spec: p('spec.json'),
+      plan_claude: p('plan.claude.json'),
+      plan_codex: p('plan.codex.json'),
+      rebuttal_claude: quick ? null : p('plan-rebuttal.claude.json'),
+      rebuttal_codex: quick ? null : p('plan-rebuttal.codex.json'),
+      ...answerInputs(FD),
+    }),
+    schema: 'PlanSynthesis',
+    synth: p('plan-synthesis.json'),
+    final: p('plan.json'),
+    answers: p('plan-decisions.json'),
+  });
+
+  // ── challenge: both attack the plan → host folds in
+  let finalPlan = p('plan.json');
+  if (!quick) {
+    yield both(ctx, {
+      id: `${f.id}/challenge`,
+      title: `${f.id}: challenge the plan (Claude ∥ Codex)`,
+      role: 'challenger',
+      schema: 'Challenge',
+      cwd: wt,
+      out: (a) => p(`challenge.${a}.json`),
+      prompt: () => workerPrompt('challenger', ctx.repo, { spec: readJson(p('spec.json')), plan: readJson(p('plan.json')).plan, decisions: allAnswers(FD) }),
+    });
+    yield* decided(ctx, FD, meta, {
+      id: `${f.id}/challenge-synthesis`,
+      title: `${f.id}: fold in challenge findings`,
+      instructions: hostInstructions('challenge'),
+      inputs: { spec: p('spec.json'), plan: p('plan.json'), challenge_claude: p('challenge.claude.json'), challenge_codex: p('challenge.codex.json') },
+      schema: 'ChallengeSynthesis',
+      synth: p('challenge-synthesis.json'),
+      final: p('plan-final.json'),
+      answers: p('challenge-decisions.json'),
+    });
+    finalPlan = p('plan-final.json');
+  }
+  const plan = () => readJson(finalPlan).plan;
+
+  // ── tasks DAG
+  yield host(`${f.id}/tasks`, `${f.id}: break plan into tasks`, {
+    instructions: hostInstructions('tasks'),
+    inputs: { spec: p('spec.json'), plan: finalPlan },
+    schema: 'Tasks',
+    output: p('tasks.json'),
+    postprocess: (d) => {
+      if (!d.tasks.length) throw new Error('At least one task is required');
+      if (new Set(d.tasks.map((t: Task) => t.id)).size !== d.tasks.length) throw new Error('Duplicate task ids');
+      topoSort(d.tasks);
+      return d;
+    },
+  });
+  const tasks = topoSort(readJson<{ tasks: Task[] }>(p('tasks.json')).tasks);
+  const assignment: Record<string, AgentName> = {};
+  tasks.forEach((t, i) => (assignment[t.id] = i % 2 === 0 ? ctx.config.first_implementer : other(ctx.config.first_implementer)));
+
+  yield det(`${f.id}/spec-commit`, `${f.id}: commit spec artifacts`, p('spec-commit.json'), async () => {
+    renderAll(FD, meta, finalPlan, assignment);
+    const sha = await commitAll(wt, `docs(${meta.number}): spec, plan and tasks for ${f.title}\n\nGenerated by orchestra run ${ctx.state.id}.`);
+    return { sha };
+  });
+
+  // ── implement: alternate implementer/reviewer per task
+  const shared = { ctx, FD, meta, spec: () => readJson(p('spec.json')), plan, tasks };
+  for (const t of tasks) yield* taskLoop(shared, t, assignment[t.id]);
+
+  // ── converge: whole-feature audit by the model that implemented less
+  const counts = { claude: 0, codex: 0 };
+  for (const t of tasks) counts[assignment[t.id]]++;
+  const auditor: AgentName = counts.claude <= counts.codex ? 'claude' : 'codex';
+  for (let c = 1; ; c++) {
+    const checksPath = p(`final-checks-${c}.json`);
+    const out = p(`converge-${c}.json`);
+    yield {
+      id: `${f.id}/converge-${c}`,
+      title: `${f.id}: convergence audit by ${auditor}`,
+      kind: 'worker',
+      done: () => exists(out),
+      run: async () => {
+        const checks = exists(checksPath) ? readJson(checksPath) : await runChecks(ctx.config, wt, meta.base, null);
+        writeJson(checksPath, checks);
+        const { stat, patch } = await diff(wt, meta.base);
+        const result = await callAgent(ctx, auditor, {
+          stepId: `${f.id}/converge-${c}`,
+          role: 'converger',
+          writable: false,
+          cwd: wt,
+          schema: 'Converge',
+          prompt: workerPrompt('converger', ctx.repo, { spec: shared.spec(), plan: plan(), tasks, checks, diff_stat: stat, diff: patch }),
+        });
+        writeJson(out, result);
+      },
+    };
+    const conv = readJson(out);
+    if (conv.status === 'converged') break;
+    const decision = p(`converge-${c}-decision.json`);
+    yield gate(`${f.id}/converge-${c}-decision`, `${f.id}: convergence found issues`, {
+      context: [out],
+      questions: [
+        singleQuestion(
+          'CONVERGE',
+          `${auditor} found unmet criteria / open findings: ${conv.summary}`,
+          [
+            option('fix', 'Fix', `${other(auditor)} implements a fix task, ${auditor} reviews it`),
+            option('accept', 'Accept as-is', 'Ship with the findings recorded in the report'),
+            option('abort', 'Abort run', 'Stop here'),
+          ],
+          'fix',
+        ),
+      ],
+      output: decision,
+    });
+    const choice = choiceOf(decision, 'CONVERGE');
+    if (choice === 'accept') break;
+    if (choice === 'abort') {
+      yield aborted(`${f.id}/converge-${c}`);
+      return;
+    }
+    const fixTask: Task = {
+      id: `FIX${c}`,
+      title: 'Address convergence findings',
+      description: `Fix the convergence audit findings below.${choice !== 'fix' ? `\nUser guidance: ${choice}` : ''}\n\n${JSON.stringify({ unmet: conv.acceptance.filter((a: any) => !a.met), findings: conv.findings }, null, 2)}`,
+      depends_on: [],
+      files_in_scope: [],
+      acceptance: [...conv.acceptance.filter((a: any) => !a.met).map((a: any) => `${a.id} is met`), ...conv.findings.map((x: any) => x.required_change)],
+      test_command: null,
+    };
+    yield* taskLoop(shared, fixTask, other(auditor));
+  }
+
+  yield det(`${f.id}/report`, `${f.id}: write report`, p('report.json'), async () => {
+    const all = [...tasks.map((t) => t.id), ...readdirSync(join(FD, 'tasks')).filter((n) => n.startsWith('FIX'))];
+    const rows = all.map((id) => {
+      const c = readJson(join(FD, 'tasks', id, 'commit.json'));
+      return { id, title: tasks.find((t) => t.id === id)?.title ?? 'Convergence fixes', ...c };
+    });
+    const lastConv = lastNumbered(FD, 'converge-', '.json', (n) => !n.includes('decision'));
+    const lastChecks = lastNumbered(FD, 'final-checks-', '.json');
+    renderAll(FD, meta, finalPlan, assignment);
+    md('report.md', render.renderReport({ feature: f, tasks: rows, converge: lastConv ? readJson(lastConv) : { status: '?', summary: '', acceptance: [], findings: [] }, checks: lastChecks ? readJson(lastChecks) : null }));
+    const sha = await commitAll(wt, `docs(${meta.number}): orchestra report for ${f.title}`);
+    return { sha, branch: meta.branch, worktree: wt };
+  });
+}
+
+// ───────────────────────────── task loop ─────────────────────────────
+
+type Shared = { ctx: Ctx; FD: string; meta: FeatureMeta; spec: () => any; plan: () => any; tasks: Task[] };
+
+function* taskLoop(s: Shared, t: Task, impl: AgentName): Generator<Step> {
+  const { ctx, meta } = s;
+  const wt = meta.worktree;
+  const rev = other(impl);
+  const TD = join(s.FD, 'tasks', t.id);
+  const p = (n: string) => join(TD, n);
+  const id = `${meta.id}/${t.id}`;
+
+  yield det(`${id}/start`, `${id}: start task`, p('base.json'), async () => ({ base: await head(wt), implementer: impl, reviewer: rev, task: t }));
+  const base = readJson(p('base.json')).base as string;
+
+  let limit = ctx.config.max_review_rounds;
+  let escalations = 0;
+  let accepted = false;
+  for (let r = 1; ; r++) {
+    const prevReview = r > 1 ? readJson(p(`review-${r - 1}.json`)) : null;
+    const prevChecks = r > 1 ? readJson(p(`checks-${r - 1}.json`)) : null;
+    const guidance = escalationGuidance(TD, escalations);
+
+    yield {
+      id: `${id}/r${r}/implement`,
+      title: `${id}: ${impl} implements (round ${r})`,
+      kind: 'worker',
+      done: () => exists(p(`impl-${r}.json`)),
+      run: async () => {
+        const out = await callAgent(ctx, impl, {
+          stepId: `${id}/r${r}/implement`,
+          role: 'implementer',
+          writable: true,
+          cwd: wt,
+          schema: 'Implementation',
+          prompt: workerPrompt(
+            'implementer',
+            ctx.repo,
+            {
+              spec: s.spec(),
+              plan: s.plan(),
+              task: t,
+              all_tasks: s.tasks.map((x) => ({ id: x.id, title: x.title, depends_on: x.depends_on })),
+              review_findings_to_address: prevReview,
+              polish_round:
+                prevReview?.status === 'approved'
+                  ? `${rev} approved your work but raised minor findings. Address each one, or dispute it with reasoning; make no unrelated changes.`
+                  : null,
+              failing_checks: prevChecks && !prevChecks.passed ? summarizeChecks(prevChecks) : null,
+              user_guidance: guidance.length ? guidance : null,
+            },
+            `You are ${impl}. Round ${r}. ${rev} will review your work.`,
+          ),
+        });
+        writeJson(p(`impl-${r}.json`), out);
+      },
+    };
+
+    yield det(`${id}/r${r}/checks`, `${id}: run checks (round ${r})`, p(`checks-${r}.json`), async () => {
+      const res = await runChecks(ctx.config, wt, base, t);
+      ctx.print(`    checks: ${res.passed ? 'passed' : 'FAILED'} (${res.commands.map((c) => `${c.cmd}=${c.exit_code}`).join(', ') || 'no commands configured'})`);
+      return res;
+    });
+
+    yield {
+      id: `${id}/r${r}/review`,
+      title: `${id}: ${rev} reviews (round ${r})`,
+      kind: 'worker',
+      done: () => exists(p(`review-${r}.json`)),
+      run: async () => {
+        const before = await snapshot(wt);
+        const { stat, patch } = await diff(wt, base);
+        const out = await callAgent(ctx, rev, {
+          stepId: `${id}/r${r}/review`,
+          role: 'reviewer',
+          writable: false,
+          cwd: wt,
+          schema: 'Review',
+          prompt: workerPrompt(
+            'reviewer',
+            ctx.repo,
+            {
+              spec: s.spec(),
+              plan: s.plan(),
+              task: t,
+              implementation_report: readJson(p(`impl-${r}.json`)),
+              checks: readJson(p(`checks-${r}.json`)),
+              previous_review: prevReview,
+              diff_stat: stat,
+              diff: patch,
+            },
+            `You are ${rev}, reviewing ${impl}'s work. Round ${r} of at most ${limit}. Base commit: ${base}.`,
+          ),
+        });
+        const after = await snapshot(wt);
+        if (after !== before) {
+          await restore(wt, before);
+          throw new Error(`Reviewer ${rev} modified the worktree during review; changes were reverted and the review discarded. Run again to retry.`);
+        }
+        const blocking = out.findings.filter((x: any) => ctx.config.review.blocking.includes(x.severity));
+        if (out.status === 'approved' && blocking.length) out.status = 'changes_required';
+        writeJson(p(`review-${r}.json`), out);
+        ctx.print(`    review: ${out.status} (${out.findings.length} findings, ${blocking.length} blocking)`);
+      },
+    };
+
+    const review = readJson(p(`review-${r}.json`));
+    const checks = readJson<CheckResult>(p(`checks-${r}.json`));
+    if (review.status === 'approved' && checks.passed) {
+      // Polish: an approved review with low-severity findings gets one more implement/review round,
+      // so findings both models agree are worth fixing don't silently ship.
+      const polishUsed = countPolishRounds(TD, r - 1, ctx.config.review.polish);
+      if (!hasPolishFindings(review, ctx.config.review.polish) || polishUsed >= ctx.config.review.polish_rounds) break;
+      ctx.print(`    polish: ${rev} approved with ${ctx.config.review.polish.join('/')} findings — one polish round`);
+      limit = Math.max(limit, r + 1);
+      continue;
+    }
+    if (r < limit) continue;
+
+    const esc = p(`escalation-${escalations + 1}.json`);
+    yield gate(`${id}/escalation-${escalations + 1}`, `${id}: review did not converge after ${r} rounds`, {
+      context: [p(`review-${r}.json`), p(`checks-${r}.json`)],
+      questions: [
+        singleQuestion(
+          'REVIEW',
+          `${t.id} "${t.title}": ${rev} still requires changes after ${r} rounds (${review.summary}). Checks ${checks.passed ? 'pass' : 'FAIL'}. Answer with free text to retry with your guidance.`,
+          [
+            option('retry', `Retry ${ctx.config.max_review_rounds} more rounds`, 'Keep the implement/review loop going'),
+            option('accept', 'Accept as-is', 'Commit the current state; findings are recorded in the report'),
+            option('abort', 'Abort run', 'Stop the run here'),
+          ],
+          null,
+        ),
+      ],
+      output: esc,
+    });
+    escalations++;
+    const choice = choiceOf(esc, 'REVIEW');
+    if (choice === 'accept') {
+      accepted = true;
+      break;
+    }
+    if (choice === 'abort') {
+      yield aborted(id);
+      return;
+    }
+    limit += ctx.config.max_review_rounds;
+  }
+
+  const rounds = countRounds(TD);
+  yield det(`${id}/commit`, `${id}: commit`, p('commit.json'), async () => {
+    const sha = await commitAll(
+      wt,
+      `feat(${meta.number}/${t.id}): ${t.title}\n\nImplemented-by: ${impl}\nReviewed-by: ${rev}\nReview-rounds: ${rounds}${accepted ? '\nAccepted-with-open-findings: yes' : ''}\nOrchestra-run: ${ctx.state.id}`,
+    );
+    return { sha, implementer: impl, reviewer: rev, rounds, accepted_with_issues: accepted };
+  });
+}
+
+// ───────────────────────────── decision blocks ─────────────────────────────
+
+/** Host synthesis that may surface decisions: synth → (user decisions → host finalize) → final. */
+function* decided(
+  ctx: Ctx,
+  FD: string,
+  meta: FeatureMeta,
+  o: { id: string; title: string; instructions: string; inputs: Record<string, string>; schema: string; synth: string; final: string; answers: string },
+): Generator<Step> {
+  yield host(o.id, o.title, {
+    instructions: o.instructions,
+    inputs: o.inputs,
+    schema: o.schema,
+    output: o.synth,
+    postprocess: (d) => {
+      normalizeQuestions(d);
+      const bounced = bounceConflicts(ctx.config, d);
+      if (bounced.length) ctx.print(`    escalated to user: ${bounced.join(', ')}`);
+      return d;
+    },
+    after: (d) => {
+      if (!d.questions.length) writeJson(o.final, { plan: d.plan });
+      writeText(join(meta.specDir, 'plan.md'), render.renderPlan(d.plan, d));
+    },
+  });
+  const synth = readJson(o.synth);
+  if (!synth.questions.length) return;
+  yield gate(`${o.id}-decisions`, `${o.title}: decisions needed`, {
+    context: [join(meta.specDir, 'plan.md')],
+    questions: synth.questions,
+    output: o.answers,
+    after: () => renderDecisionsMd(FD, meta),
+  });
+  yield host(`${o.id}-finalize`, `${o.title}: apply decisions`, {
+    instructions: hostInstructions('finalize'),
+    inputs: { synthesis: o.synth, decisions: o.answers },
+    schema: 'PlanFinal',
+    output: o.final,
+    after: (d) => writeText(join(meta.specDir, 'plan.md'), render.renderPlan(d.plan, synth)),
+  });
+}
+
+// ───────────────────────────── small helpers ─────────────────────────────
+
+function aborted(id: string): Step {
+  return {
+    id: `${id}/aborted`,
+    title: 'Aborted by user',
+    kind: 'deterministic',
+    done: () => false,
+    run: async () => {
+      throw new Error(`Run aborted by user at ${id}`);
+    },
+  };
+}
+
+function pick(o: Record<string, string | null>): Record<string, string> {
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => v)) as Record<string, string>;
+}
+
+function normalizeQuestions(d: { questions: MergedQ[] }) {
+  const ids = new Set<string>();
+  for (const q of d.questions) {
+    if (ids.has(q.id)) throw new Error(`Duplicate question id ${q.id}`);
+    ids.add(q.id);
+    if (q.suggested && !q.options.some((o) => o.key === q.suggested)) throw new Error(`${q.id}: suggested "${q.suggested}" is not an option key`);
+  }
+  return d;
+}
+
+function answerFiles(FD: string): string[] {
+  if (!existsSync(FD)) return [];
+  return readdirSync(FD)
+    .filter((n) => /^answers-\d+\.json$/.test(n) || /-decisions\.json$/.test(n))
+    .map((n) => join(FD, n));
+}
+
+function answerInputs(FD: string, beforeRound = Infinity): Record<string, string> {
+  return Object.fromEntries(
+    answerFiles(FD)
+      .filter((f) => {
+        const m = f.match(/answers-(\d+)\.json$/);
+        return !m || Number(m[1]) < beforeRound;
+      })
+      .map((f) => [`user_${f.split('/').pop()!.replace('.json', '')}`, f]),
+  );
+}
+
+function allAnswers(FD: string) {
+  return answerFiles(FD).map((f) => readJson(f));
+}
+
+function renderDecisionsMd(FD: string, meta: FeatureMeta) {
+  const entries = answerFiles(FD).map((f) => {
+    const d = readJson(f);
+    return { phase: f.split('/').pop()!.replace('.json', ''), questions: d.questions, answers: d.answers };
+  });
+  writeText(join(meta.specDir, 'decisions.md'), render.renderDecisions(entries));
+}
+
+function renderAll(FD: string, meta: FeatureMeta, finalPlan: string, assignment: Record<string, string>) {
+  const w = (n: string, c: string) => writeText(join(meta.specDir, n), c);
+  w('research.md', render.renderResearch(readJson(join(FD, 'research.json'))));
+  w('spec.md', render.renderSpec(readJson(join(FD, 'spec.json'))));
+  const synth = exists(join(FD, 'challenge-synthesis.json')) ? readJson(join(FD, 'challenge-synthesis.json')) : {};
+  const planSynth = readJson(join(FD, 'plan-synthesis.json'));
+  w('plan.md', render.renderPlan(readJson(finalPlan).plan, { conflicts: planSynth.conflicts, accepted: synth.accepted, rejected: synth.rejected }));
+  if (exists(join(FD, 'tasks.json'))) w('tasks.md', render.renderTasks(readJson(join(FD, 'tasks.json')), assignment));
+  renderDecisionsMd(FD, meta);
+}
+
+function escalationGuidance(TD: string, count: number): string[] {
+  const out: string[] = [];
+  for (let i = 1; i <= count; i++) {
+    const c = choiceOf(join(TD, `escalation-${i}.json`), 'REVIEW');
+    if (c && !['retry', 'accept', 'abort'].includes(c)) out.push(c);
+  }
+  return out;
+}
+
+function summarizeChecks(c: CheckResult) {
+  return {
+    failing_commands: c.commands.filter((x) => x.exit_code !== 0).map((x) => ({ cmd: x.cmd, output_tail: x.output_tail })),
+    protected_violations: c.protected_violations,
+  };
+}
+
+function hasPolishFindings(review: any, severities: string[]): boolean {
+  return review.status === 'approved' && review.findings.some((f: any) => severities.includes(f.severity));
+}
+
+/** Number of rounds before `upTo` (inclusive) whose approved review triggered a polish round. */
+function countPolishRounds(TD: string, upTo: number, severities: string[]): number {
+  let n = 0;
+  for (let i = 1; i <= upTo; i++) {
+    const p = join(TD, `review-${i}.json`);
+    if (exists(p) && hasPolishFindings(readJson(p), severities)) n++;
+  }
+  return n;
+}
+
+function countRounds(TD: string): number {
+  return existsSync(TD) ? readdirSync(TD).filter((n) => /^review-\d+\.json$/.test(n)).length : 0;
+}
+
+function lastNumbered(dir: string, prefix: string, suffix: string, filter: (n: string) => boolean = () => true): string | null {
+  const names = readdirSync(dir).filter((n) => n.startsWith(prefix) && n.endsWith(suffix) && filter(n));
+  if (!names.length) return null;
+  names.sort((a, b) => Number(a.slice(prefix.length).split(/\D/)[0]) - Number(b.slice(prefix.length).split(/\D/)[0]));
+  return join(dir, names[names.length - 1]);
+}

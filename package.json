@@ -1,0 +1,17 @@
+{
+  "name": "orchestra",
+  "version": "0.1.0",
+  "description": "Claude Code × Codex CLI dual-model, spec-driven development orchestrator",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "orch": "bin/orch.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "install-local": "sh scripts/install.sh"
+  }
+}
