@@ -27,6 +27,12 @@ export async function addWorktree(repo: string, path: string, branch: string, ba
   await git(repo, 'worktree', 'add', '-b', branch, path, base);
 }
 
+/** Best effort: a leftover task worktree or branch is harmless, so cleanup failures are ignored. */
+export async function removeWorktree(repo: string, path: string, branch: string): Promise<void> {
+  await git(repo, 'worktree', 'remove', '--force', path).catch(() => {});
+  await git(repo, 'branch', '-D', branch).catch(() => {});
+}
+
 /** Stage everything (respecting .gitignore) so diffs include new files uniformly. */
 async function stageAll(wt: string): Promise<void> {
   await git(wt, 'add', '-A');
@@ -50,11 +56,14 @@ export async function changedFiles(wt: string, base: string): Promise<string[]> 
   return out ? out.split('\n') : [];
 }
 
-export async function diff(wt: string, base: string, maxChars = 200_000): Promise<{ stat: string; patch: string }> {
+/** Inline diffs are capped: past this the reader is told how to page through the rest with git. */
+export async function diff(wt: string, base: string, maxChars = 60_000): Promise<{ stat: string; patch: string }> {
   await stageAll(wt);
   const stat = await git(wt, 'diff', '--cached', '--stat', base);
   let patch = await git(wt, 'diff', '--cached', base);
-  if (patch.length > maxChars) patch = patch.slice(0, maxChars) + `\n…(diff truncated, ${patch.length - maxChars} more chars — inspect the worktree)`;
+  if (patch.length > maxChars) {
+    patch = patch.slice(0, maxChars) + `\n…(diff truncated, ${patch.length - maxChars} more chars — run \`git diff ${base} -- <path>\` for the files you need; see diff_stat)`;
+  }
   return { stat, patch };
 }
 

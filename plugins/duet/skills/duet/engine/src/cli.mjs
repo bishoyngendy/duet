@@ -220,7 +220,7 @@ function status(ctx     , json         )         {
   for (const f of features) console.log(`\n  ${f.id} ${f.title}\n     branch   ${f.branch}\n     worktree ${f.worktree}\n     specs    ${f.specDir}`);
   const costLine = Object.entries(costs).map(([a, c]) => `${a}: ${c.calls} calls, ${fmtMs(c.ms)}${c.cost ? `, $${c.cost.toFixed(2)}` : ''}`);
   if (costLine.length) console.log(`\nAgents   ${costLine.join(' · ')}`);
-  const hint = { needs_synthesis: 'duet next', needs_answers: 'duet next', idle: 'duet run', failed: 'duet run (after fixing the cause)', running: 'duet log', done: '' }[ctx.state.status];
+  const hint = { needs_synthesis: 'duet next', needs_answers: 'duet next', idle: 'duet run', failed: 'duet run (after fixing the cause)', running: 'duet log', interrupted: 'duet run (resumes where it stopped)', done: '' }[ctx.state.status];
   if (hint) console.log(`\nNext     ${hint}`);
   return 0;
 }

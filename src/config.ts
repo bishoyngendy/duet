@@ -24,6 +24,8 @@ export type Config = {
   /** Agent that performs host steps (synthesis) when `duet run --headless` is used. */
   synthesizer_fallback: AgentName;
   first_implementer: AgentName;
+  /** Max tasks implemented at once, each in its own worktree (independent tasks with disjoint files_in_scope). 1 = serial. */
+  parallel_tasks: number;
   max_review_rounds: number;
   review: {
     /** Severities that make a review "changes_required" even if the reviewer approved. */
@@ -45,11 +47,17 @@ export type Config = {
 export const DEFAULT_CONFIG: Config = {
   agents: {
     claude: { model: 'claude-opus-5-5', effort: 'high', roles: { scanner: { effort: 'medium' }, questioner: { effort: 'medium' } } },
-    codex: { model: 'gpt-6.1-sol', effort: 'high', roles: { scanner: { effort: 'medium' }, questioner: { effort: 'medium' } } },
+    // Codex is the slower model on every parallel step; analysis roles run at medium so it stops gating them.
+    codex: {
+      model: 'gpt-6.1-sol',
+      effort: 'high',
+      roles: Object.fromEntries(['scanner', 'questioner', 'researcher', 'rebutter', 'challenger', 'reviewer'].map((r) => [r, { effort: 'medium' }])),
+    },
   },
   depth: 'standard',
   synthesizer_fallback: 'claude',
   first_implementer: 'claude',
+  parallel_tasks: 3,
   max_review_rounds: 3,
   review: { blocking: ['critical', 'high', 'medium'], polish: ['low'], polish_rounds: 1 },
   max_clarify_rounds: { quick: 1, standard: 2, deep: 3 },

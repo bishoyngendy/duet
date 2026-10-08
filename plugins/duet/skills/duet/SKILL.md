@@ -53,7 +53,11 @@ After `duet run` exits, run `duet status --json` and act on `status`:
    agent timeout, schema failure — raw agent output is under `.duet/runs/<run>/raw/`). Fix the cause with the
    user, then `duet run` (completed steps are never redone).
 
-4. **done** → summarise per feature from `duet status`: branch, worktree, `specs/NNN-*/report.md` (tasks,
+4. **interrupted** → the `duet run` process died mid-step (its session ended, it was killed, the machine slept).
+   Tell the user in one line and `duet run` again (background); the in-flight step restarts, nothing else is redone.
+   **running** while you have no `duet run` of your own in flight means another process is advancing it — don't start a second one.
+
+5. **done** → summarise per feature from `duet status`: branch, worktree, `specs/NNN-*/report.md` (tasks,
    implementer/reviewer, rounds, acceptance). Offer to open PRs (`gh pr create` from the worktree, base = the
    previous feature's branch for stacked features) — only if the user agrees.
 

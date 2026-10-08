@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { appendLine, exists, readJson, readText, slugify, writeJson, writeText } from './util.mjs';
                                          
 
-                                                                                                     
+/** 'interrupted' is never stored: it is what a stored 'running' reads as once the runner process is gone. */
+                                                                                                                     
 
                         
              
@@ -43,7 +44,12 @@ export function listRuns(repo        )           {
 }
 
 export function loadState(dir        )           {
-  return readJson          (join(dir, 'state.json'));
+  const state = readJson          (join(dir, 'state.json'));
+  if (state.status === 'running' && !lockHolder(dir)) {
+    state.status = 'interrupted';
+    state.message = 'The process advancing this run is gone (killed, crashed or its session ended). `duet run` resumes it; completed work is kept.';
+  }
+  return state;
 }
 
 export function saveState(dir        , state          )       {
@@ -55,18 +61,24 @@ export function logEvent(dir        , event                         )       {
   appendLine(join(dir, 'events.jsonl'), JSON.stringify({ ts: new Date().toISOString(), ...event }));
 }
 
+/** Pid of the live process holding the run lock, or null. */
+export function lockHolder(dir        )                {
+  const p = join(dir, 'run.lock');
+  if (!exists(p)) return null;
+  const pid = Number(readText(p).trim());
+  try {
+    process.kill(pid, 0);
+    return pid;
+  } catch {
+    return null;
+  }
+}
+
 /** Single-writer lock per run so two `duet run`s never advance the same run concurrently. */
 export function acquireLock(dir        )             {
   const p = join(dir, 'run.lock');
-  if (exists(p)) {
-    const pid = Number(readText(p).trim());
-    let alive = false;
-    try {
-      process.kill(pid, 0);
-      alive = true;
-    } catch {}
-    if (alive && pid !== process.pid) throw new Error(`Run is already being advanced by pid ${pid} (lock: ${p})`);
-  }
+  const pid = lockHolder(dir);
+  if (pid && pid !== process.pid) throw new Error(`Run is already being advanced by pid ${pid} (lock: ${p})`);
   writeText(p, String(process.pid));
   return () => rmSync(p, { force: true });
 }

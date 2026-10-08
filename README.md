@@ -27,6 +27,7 @@ per feature, in dependency order, on a stacked branch + worktree:
   challenge (C∥X) → fold in (host) → ⛔ new ambiguities
   tasks DAG (host) → commit specs/NNN-slug/
   per task: implement (alternating C/X) → checks (engine) → review (other model, read-only) → … ≤3 rounds → ⛔
+    (independent tasks with disjoint files_in_scope run concurrently, each in its own worktree, then merge in order)
   converge audit → ⛔ fix/accept → report.md
 ```
 
@@ -78,9 +79,13 @@ Edit `checks.setup` (e.g. `pnpm install --frozen-lockfile`, run in each fresh wo
 
 Other useful settings in `config.json`:
 
-- `agents.<claude|codex>.roles.<role>` sets `{ model, effort }` per role. By default the scan and question rounds run at `medium` effort.
+- `agents.<claude|codex>.roles.<role>` sets `{ model, effort }` per role. By default the scan and question rounds run at `medium` effort for both models, and Codex also runs research, rebuttal, challenge and review at `medium` (it was the long pole of every parallel step); planning and implementation stay `high`.
+- `parallel_tasks` (default `3`) caps how many independent tasks are implemented at once. Tasks join a wave only
+  when their dependencies are done and their `files_in_scope` globs can't overlap; each gets its own worktree (running
+  `checks.setup`), and its commit is cherry-picked onto the feature branch. A task that still conflicts is redone on top
+  of the merged work. `1` keeps implementation strictly serial.
 - `review.blocking` (default `critical/high/medium`) lists severities that force another round even if the reviewer approved.
-- `review.polish` (default `low`) and `review.polish_rounds` (default `1`) control the polish round: when a review approves with these findings, the implementer addresses or disputes them in one extra round.
+- `review.polish` (default `low`) and `review.polish_rounds` (default `1`) control the polish round: when a review approves with these findings, the implementer addresses or disputes them in one extra round. That round is gated by the checks, not re-reviewed; if checks fail it goes back to review.
 - `escalate_categories` lists conflict categories the host may never settle on its own.
 
 Read-only roles can run commands (tests, probes) but can't write: Claude runs inside Claude Code's OS sandbox with the working tree write-denied, and Codex runs with `-s read-only`. Reviewers are also checked against a before/after snapshot of the worktree. `duet agent-test` verifies both properties.
