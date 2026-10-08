@@ -10,7 +10,7 @@ import { advance, answer, costSummary, gateView, hostTaskView, locate, submit,  
 import { currentBranch, git, head, repoRoot } from './git.mjs';
 import { liveDir } from './live.mjs';
 import { openPanes } from './panes.mjs';
-import { PHASES,                      } from './pipeline.mjs';
+import { PHASES, specTitle,                      } from './pipeline.mjs';
 import { resolveFeature } from './features.mjs';
 import { constitutionPath, detect } from './speckit.mjs';
 import { runnerLog, watch } from './watch.mjs';
@@ -106,7 +106,9 @@ export async function main(argv          )                  {
     case 'implement':
     case 'converge': {
       const repo = await projectRoot();
-      const entry = resolveFeature(repo, { flag: v.feature, branch: await currentBranch(repo).catch(() => undefined) });
+      const found = resolveFeature(repo, { flag: v.feature, branch: await currentBranch(repo).catch(() => undefined) });
+      if ('adopt' in found) return go(await adopt(found.adopt, (v.depth         ) ?? undefined), { phase: cmd, feature: 'F1' }, v);
+      const entry = found;
       setCurrentRun(repo, entry.run);
       console.log(`${entry.spec_dir} (run ${entry.run}, ${entry.feature}) → ${cmd}`);
       if (cmd === 'analyze') requestAnalysis(runDir(repo, entry.run), entry.feature);
@@ -202,6 +204,19 @@ const exitFor = (s                    ) => (s === 'failed' ? 1 : 0);
  * Starts `duetto run` as its own process group with output to live/runner.log, and returns at once. The run
  * then survives the shell or session that started it; `duetto watch --milestones` follows it.
  */
+/** Takes over a spec written with Spec Kit (/speckit-specify): a single-feature run that imports its spec.md. */
+async function adopt(specDir        , depth        )               {
+  const repo = await projectRoot();
+  const md = readText(join(repo, specDir, 'spec.md'));
+  const input = md.match(/\*\*Input\*\*:\s*User description:\s*"([\s\S]*?)"\s*$/m)?.[1];
+  console.log(`Adopting ${specDir} (written with Spec Kit): Claude and Codex take it from here.`);
+  const ctx = await start(input ?? specTitle(md) ?? specDir, depth, 'single');
+  ctx.state.adopted = { spec_dir: specDir };
+  saveState(ctx.dir, ctx.state);
+  writeText(join(ctx.dir, 'adopted-spec.md'), md);
+  return ctx;
+}
+
 /** `duetto analyze` always analyzes afresh (like /speckit-analyze): earlier results are moved aside. */
 function requestAnalysis(dir        , feature        ) {
   const FD = join(dir, 'features', feature);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { engine, util } from './impl.ts';
@@ -427,4 +427,56 @@ test('deep runs analyze automatically, but not runs that were already implementi
   mkdirSync(join(legacy.dir, 'features', 'F1', 'tasks', 'T001'), { recursive: true }); // implementation had begun
   await drive(legacy, host, withConflict(() => 'suggested'), 200, { phase: 'converge' });
   assert.ok(!existsSync(join(legacy.dir, 'features', 'F1', 'analysis.json')));
+});
+
+test('hand edits to spec.md before implementing are folded back in and the plan is redone', async () => {
+  const repo = gitRepo();
+  const claude = new FakeAgent('claude', implementerWrites);
+  let reconciled: any = null;
+  const host: HostScript = (step, base) => {
+    if (step.id.includes('spec-reconcile')) {
+      reconciled = step.host!.inputs;
+      return { ...base, title: 'Edited title' };
+    }
+    return hostScript(step, base);
+  };
+  const ctx = makeRun(repo, { claude, codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'plan' });
+  const FD = join(ctx.dir, 'features', 'F1');
+  const meta = readJson(join(FD, 'feature.json'));
+  const plannersBefore = claude.calls.filter((c) => c.role === 'planner').length;
+  writeFileSync(join(meta.specDir, 'spec.md'), readFileSync(join(meta.specDir, 'spec.md'), 'utf8') + '\n- **FR-099**: System MUST also wave.\n');
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'plan' });
+  assert.ok(reconciled, 'a reconcile host step ran');
+  assert.match(reconciled.edited_markdown, /spec\.md$/);
+  assert.equal(readJson(join(FD, 'spec-final.json')).title, 'Edited title');
+  assert.match(readFileSync(join(meta.specDir, 'spec.md'), 'utf8'), /^# Feature Specification: Edited title/, 're-rendered from the new JSON');
+  assert.equal(claude.calls.filter((c) => c.role === 'planner').length, plannersBefore + 1, 'plan redone on the edited spec');
+  assert.ok(readdirSync(join(FD, 'superseded')).some((d) => d.endsWith('spec-edited')));
+  // Ticking checkboxes in tasks.md is progress, not an edit; edits after implementation starts are left alone.
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'converge' });
+  writeFileSync(join(meta.specDir, 'plan.md'), 'rewritten');
+  assert.ok(!locate(ctx).step, 'nothing to reconcile once implemented');
+});
+
+test('a spec written with Spec Kit is adopted: imported, then researched, clarified and planned by both models', async () => {
+  const repo = gitRepo();
+  const ctx = makeRun(repo, { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  ctx.state.mode = 'single';
+  ctx.state.adopted = { spec_dir: 'specs/007-dark-mode' };
+  writeFileSync(join(ctx.dir, 'adopted-spec.md'), '# Feature Specification: Dark mode\n\n**Input**: User description: "add dark mode"\n');
+  let imported: any = null;
+  const host: HostScript = (step, base) => {
+    if (step.id === 'F1/specify') imported = step;
+    return hostScript(step, base);
+  };
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'plan' });
+  assert.equal(imported.title, 'F1: import your Spec Kit spec');
+  assert.match(imported.host.inputs.spec_md, /adopted-spec\.md$/);
+  assert.match(imported.host.instructions, /import a Spec Kit spec/);
+  const meta = readJson(join(ctx.dir, 'features', 'F1', 'feature.json'));
+  assert.equal(meta.number, '007');
+  assert.match(meta.specDir, /specs\/007-dark-mode$/);
+  assert.equal(readJson(join(ctx.dir, 'decomposition.json')).features[0].title, 'Dark mode');
+  assert.ok(existsSync(join(meta.specDir, 'plan.md')));
 });

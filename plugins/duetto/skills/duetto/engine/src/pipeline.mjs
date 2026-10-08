@@ -2,8 +2,8 @@
 // The workflow, expressed as a generator of steps. Every step's completion is derived from artifacts
 // on disk, so the "current position" is always recomputed: resuming after a crash is just running again.
 
-import { existsSync, readdirSync, renameSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { other, runAgent,             } from './agents/index.mjs';
                                               
 import { bounceConflicts } from './conflict.mjs';
@@ -15,7 +15,7 @@ import { hostInstructions, workerPrompt } from './prompt.mjs';
 import * as render from './render.mjs';
 import { SCHEMAS,                                                                    } from './schemas.mjs';
 import { logEvent,               } from './state.mjs';
-import { appendLine, exec, exists, fmtMs, readJson, readText, sh, slugify, tail, topoSort, writeJson, writeText } from './util.mjs';
+import { appendLine, exec, exists, fmtMs, readJson, readText, sh, sha, slugify, tail, topoSort, writeJson, writeText } from './util.mjs';
 import { highestReserved, registerFeature } from './features.mjs';
 import { detect, nextFeatureNumber, resolveTemplate, writeFeatureDir } from './speckit.mjs';
 import { planWaves } from './waves.mjs';
@@ -157,6 +157,8 @@ export function phaseOf(id        )                                     {
   if (id.startsWith('decompose')) return { phase: 'decompose' };
   const [feature, rest = ''] = [id.slice(0, id.indexOf('/')), id.slice(id.indexOf('/') + 1)];
   const table                    = [
+    [/^spec-reconcile/, 'plan'],
+    [/^(plan|tasks)-reconcile/, 'tasks'],
     [/^(setup|templates|research|specify$)/, 'specify'],
     [/^(clarify-|specify-revise)/, 'clarify'],
     [/^(plan|challenge)/, 'plan'],
@@ -199,6 +201,9 @@ function* steps(ctx     )                  {
   }
 }
 
+/** `# Feature Specification: Title` → `Title`. */
+export const specTitle = (md        ) => md.match(/^#\s+(?:Feature Specification:\s*)?(.+)$/m)?.[1].trim() ?? null;
+
 /** `duetto specify`: the request is one feature, so decomposition is just bookkeeping. */
 function singleFeature(ctx     )       {
   const out = join(ctx.dir, 'decomposition.json');
@@ -209,8 +214,11 @@ function singleFeature(ctx     )       {
     done: () => exists(out),
     run: async () => {
       const request = readText(join(ctx.dir, 'request.md')).trim();
-      const title = request.split('\n')[0].slice(0, 80);
-      const d = { rationale: 'Single feature (duetto specify).', features: [{ id: 'F1', slug: slugify(request, 40), title, summary: request, scope: request, depends_on: [] }] };
+      const adopted = ctx.state.adopted?.spec_dir;
+      const title = adopted ? specTitle(readText(join(ctx.dir, 'adopted-spec.md'))) ?? request : request.split('\n')[0].slice(0, 80);
+      const slug = adopted ? basename(adopted).replace(/^\d+-/, '') : slugify(request, 40);
+      const rationale = adopted ? `Adopted ${adopted} (written with Spec Kit).` : 'Single feature (duetto specify).';
+      const d = { rationale, features: [{ id: 'F1', slug, title, summary: request, scope: request, depends_on: [] }] };
       writeJson(out, d);
       writeText(join(ctx.dir, 'decomposition.md'), render.renderDecomposition(d));
     },
@@ -271,8 +279,22 @@ function* decompose(ctx     )                  {
                                                                                                                                                 
 
 /** Renders a feature's Spec Kit documents into its specs/NNN-slug/ dir. */
+/** Checkbox state is progress, not an edit. */
+const normalizeMd = (md        ) => md.replace(/^(\s*- )\[[xX]\]/gm, '$1[ ]').trim();
+const renderedPath = (FD        ) => join(FD, 'rendered.json');
+
+/** True when the user edited a rendered document (spec.md, plan.md, tasks.md) since duetto last wrote it. */
+function drifted(FD        , meta             , doc        )          {
+  const file = join(meta.specDir, doc);
+  const recorded = exists(renderedPath(FD)) ? readJson(renderedPath(FD))[doc] : undefined;
+  return Boolean(recorded && exists(file) && sha(normalizeMd(readText(file))) !== recorded);
+}
+
 function docs(ctx     , FD        , meta             ) {
-  const w = (n        , c        ) => writeText(join(meta.specDir, n), c);
+  const w = (n        , c        ) => {
+    writeText(join(meta.specDir, n), c);
+    if (['spec.md', 'plan.md', 'tasks.md'].includes(n)) writeJson(renderedPath(FD), { ...(exists(renderedPath(FD)) ? readJson(renderedPath(FD)) : {}), [n]: sha(normalizeMd(c)) });
+  };
   const finalSpec = join(FD, 'spec-final.json');
   const specFile = () => (exists(finalSpec) ? finalSpec : join(FD, 'spec.json'));
   const docMeta = () => ({ branch: meta.branch, request: readText(join(ctx.dir, 'request.md')), date: ctx.state.created_at.slice(0, 10) });
@@ -307,10 +329,11 @@ function* feature(ctx     , f         , prev                )                  {
     const branch = `duetto/${ctx.state.id}/${f.id}-${f.slug}`;
     if (!existsSync(wt)) await addWorktree(ctx.repo, wt, branch, baseSha);
     const specsRoot = join(wt, 'specs');
-    const number = String(Math.max(Number(nextFeatureNumber(specsRoot)), highestReserved(ctx.repo) + 1)).padStart(3, '0');
+    const adopted = ctx.state.adopted?.spec_dir;
+    const number = adopted ? basename(adopted).match(/^(\d+)-/)?.[1] ?? '000' : String(Math.max(Number(nextFeatureNumber(specsRoot)), highestReserved(ctx.repo) + 1)).padStart(3, '0');
     await runSetup(ctx, wt);
-    const meta              = { id: f.id, title: f.title, slug: f.slug, number, branch, worktree: wt, base: baseSha, specDir: join(specsRoot, `${number}-${f.slug}`) };
-    const specDir = `specs/${number}-${f.slug}`;
+    const specDir = adopted ?? `specs/${number}-${f.slug}`;
+    const meta              = { id: f.id, title: f.title, slug: f.slug, number, branch, worktree: wt, base: baseSha, specDir: join(wt, specDir) };
     registerFeature(ctx.repo, { run: ctx.state.id, feature: f.id, spec_dir: specDir, branch, worktree: wt });
     writeFeatureDir(wt, specDir); // Spec Kit's commands, run inside the worktree, find this feature
     return meta;
@@ -363,9 +386,12 @@ function* feature(ctx     , f         , prev                )                  {
   });
 
   // ── spec draft first, then clarify against it (Spec Kit's order: specify → clarify)
-  yield host(`${f.id}/specify`, `${f.id}: write spec`, {
-    instructions: hostInstructions('specify'),
-    inputs: { request: join(ctx.dir, 'request.md'), decomposition: join(ctx.dir, 'decomposition.json'), research: p('research.json'), spec_template: p('templates/spec-template.md') },
+  const adopted = ctx.state.adopted ? join(ctx.dir, 'adopted-spec.md') : null;
+  yield host(`${f.id}/specify`, adopted ? `${f.id}: import your Spec Kit spec` : `${f.id}: write spec`, {
+    instructions: hostInstructions(adopted ? 'specify-import' : 'specify'),
+    inputs: adopted
+      ? { spec_md: adopted, research: p('research.json'), spec_template: p('templates/spec-template.md') }
+      : { request: join(ctx.dir, 'request.md'), decomposition: join(ctx.dir, 'decomposition.json'), research: p('research.json'), spec_template: p('templates/spec-template.md') },
     schema: 'Spec',
     output: p('spec.json'),
     after: (d) => doc.spec(d),
@@ -417,6 +443,8 @@ function* feature(ctx     , f         , prev                )                  {
   }
   const specPath = exists(specFinal) ? specFinal : p('spec.json');
   const planInputs = () => ({ feature: f, spec: readJson(specPath), research: readJson(p('research.json')), decisions: allAnswers(FD) });
+
+  yield* reconcile(ctx, FD, meta, { doc: 'spec.md', json: specPath, schema: 'Spec', render: (d) => doc.spec(d), downstream: [...PLAN_FILES, ...TASK_FILES] });
 
   // ── plan: independent → rebuttal → host synthesis (+ escalated decisions)
   yield both(ctx, {
@@ -483,6 +511,7 @@ function* feature(ctx     , f         , prev                )                  {
     finalPlan = p('plan-final.json');
   }
   const plan = () => readJson(finalPlan).plan;
+  yield* reconcile(ctx, FD, meta, { doc: 'plan.md', json: finalPlan, schema: 'PlanFinal', render: (d) => doc.plan(d.plan), downstream: TASK_FILES });
 
   // ── tasks DAG
   yield host(`${f.id}/tasks`, `${f.id}: break plan into tasks`, {
@@ -490,16 +519,12 @@ function* feature(ctx     , f         , prev                )                  {
     inputs: { spec: specPath, plan: finalPlan, tasks_template: p('templates/tasks-template.md') },
     schema: 'Tasks',
     output: p('tasks.json'),
-    postprocess: (d) => {
-      if (!d.tasks.length) throw new Error('At least one task is required');
-      if (new Set(d.tasks.map((t      ) => t.id)).size !== d.tasks.length) throw new Error('Duplicate task ids');
-      topoSort(d.tasks);
-      return d;
-    },
+    postprocess: validateTasks,
   });
+  const assign = (ts        ) => Object.fromEntries(topoSort(ts).map((t, i) => [t.id, i % 2 === 0 ? ctx.config.first_implementer : other(ctx.config.first_implementer)]))                             ;
+  yield* reconcile(ctx, FD, meta, { doc: 'tasks.md', json: p('tasks.json'), schema: 'Tasks', postprocess: validateTasks, render: (d) => doc.tasks(assign(d.tasks)), downstream: ['waves.json', 'spec-commit.json', ...ANALYSIS_FILES] });
   const tasks = topoSort(readJson                   (p('tasks.json')).tasks);
-  const assignment                            = {};
-  tasks.forEach((t, i) => (assignment[t.id] = i % 2 === 0 ? ctx.config.first_implementer : other(ctx.config.first_implementer)));
+  const assignment = assign(tasks);
 
   // ── waves: independent tasks run concurrently (scheduled before the spec commit so tasks.md can mark [P]).
   // Already-started tasks (a run resumed after upgrading) stay solo in the feature worktree they began in.
@@ -896,6 +921,53 @@ async function runSetup(ctx     , wt        ) {
   if (res.code !== 0) throw new Error(`Setup command failed in ${wt}:\n${tail(res.stdout + res.stderr, 2000)}`);
 }
 
+// ───────────────────────────── hand edits ─────────────────────────────
+
+const ANALYSIS_FILES = ['analysis.claude.json', 'analysis.codex.json', 'analysis.json'];
+const TASK_FILES = ['tasks.json', 'waves.json', 'spec-commit.json', ...ANALYSIS_FILES];
+const PLAN_FILES = [
+  ...['plan.claude.json', 'plan.codex.json', 'plan-rebuttal.claude.json', 'plan-rebuttal.codex.json', 'plan-synthesis.json', 'plan-decisions.json', 'plan.json'],
+  ...['challenge.claude.json', 'challenge.codex.json', 'challenge-synthesis.json', 'challenge-decisions.json', 'plan-final.json'],
+];
+
+/** Moves later-phase artifacts aside so those steps run again on top of an edited document. */
+function supersede(FD        , names          , why        ) {
+  const present = existsSync(FD) ? readdirSync(FD).filter((n) => names.includes(n) || /^(plan|tasks)-reconcile-\d+\.json$/.test(n)) : [];
+  if (!present.length) return;
+  const to = join(FD, 'superseded', `${Date.now()}-${why}`);
+  mkdirSync(to, { recursive: true });
+  for (const n of present) renameSync(join(FD, n), join(to, n));
+}
+
+/**
+ * Spec Kit users edit spec.md / plan.md / tasks.md between commands. Before implementation starts, an edited
+ * document is folded back into its JSON by the host, and everything planned from the old version is redone.
+ * (Once tasks are being implemented, edits are left alone; the convergence audit judges against the JSON.)
+ */
+function* reconcile(
+  ctx     ,
+  FD        ,
+  meta             ,
+  o                                                                                                                                                                                  ,
+)                  {
+  if (existsSync(join(FD, 'tasks')) || !exists(o.json) || !drifted(FD, meta, o.doc)) return;
+  const base = o.doc.replace('.md', '');
+  const n = readdirSync(FD).filter((x) => x.startsWith(`${base}-reconcile-`)).length + 1;
+  yield host(`${meta.id}/${base}-reconcile-${n}`, `${meta.id}: apply your edits to ${o.doc}`, {
+    instructions: hostInstructions('reconcile'),
+    inputs: { current_json: o.json, edited_markdown: join(meta.specDir, o.doc) },
+    schema: o.schema,
+    output: join(FD, `${base}-reconcile-${n}.json`),
+    postprocess: o.postprocess,
+    after: (d) => {
+      writeJson(o.json, o.wrap ? o.wrap(d) : d);
+      supersede(FD, o.downstream, `${base}-edited`);
+      o.render(d);
+      ctx.print(`    applied your edits to ${o.doc}; later phases will be redone`);
+    },
+  });
+}
+
 // ───────────────────────────── decision blocks ─────────────────────────────
 
 /** Host synthesis that may surface decisions: synth → (user decisions → host finalize) → final. */
@@ -950,6 +1022,13 @@ function aborted(id        )       {
       throw new Error(`Run aborted by user at ${id}`);
     },
   };
+}
+
+function validateTasks(d                   ) {
+  if (!d.tasks.length) throw new Error('At least one task is required');
+  if (new Set(d.tasks.map((t) => t.id)).size !== d.tasks.length) throw new Error('Duplicate task ids');
+  topoSort(d.tasks);
+  return d;
 }
 
 function pick(o                               )                         {

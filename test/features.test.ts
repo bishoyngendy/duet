@@ -19,7 +19,7 @@ test("features resolve in Spec Kit's order: flag, SPECIFY_* env, .specify/featur
   assert.equal(pick({ flag: 'farewell' }), 'specs/003-farewell');
   assert.equal(pick({ flag: 'specs/001-login/' }), 'specs/001-login');
   assert.equal(pick({ flag: 'F2' }), 'specs/002-signup', 'F-ids are relative to the current run');
-  assert.throws(() => pick({ flag: 'nope' }), /No duetto feature matches "nope"\. Known: 001-login, 002-signup, 003-farewell/);
+  assert.throws(() => pick({ flag: 'nope' }), /No duetto feature or Spec Kit spec matches "nope"\. Known: 001-login, 002-signup, 003-farewell/);
   assert.equal(pick({ env: { SPECIFY_FEATURE_DIRECTORY: '/abs/repo/specs/003-farewell' } }), 'specs/003-farewell');
   assert.equal(pick({ env: { SPECIFY_FEATURE: '002-signup' } }), 'specs/002-signup');
   mkdirSync(join(repo, '.specify'));
@@ -48,4 +48,23 @@ test('duetto specify: single-feature run with no decomposition gate, registered 
   assert.ok(readJson(join(ctx.dir, 'features', 'F1', 'spec.json')), 'spec drafted');
   assert.ok(!engine.locate(ctx).done.some((s: any) => s.phase === 'clarify'), 'stopped before clarify');
   assert.match(ctx.state.message, /run `duetto clarify` to continue/);
+});
+
+test('a spec written with plain Spec Kit is offered for adoption, by flag or by .specify/feature.json', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'duetto-adopt-'));
+  mkdirSync(join(repo, 'specs', '003-dark-mode'), { recursive: true });
+  writeFileSync(join(repo, 'specs', '003-dark-mode', 'spec.md'), '# Feature Specification: Dark mode\n');
+  mkdirSync(join(repo, 'specs', '004-empty'), { recursive: true }); // no spec.md: nothing to adopt
+  assert.equal(features.findAdoptable(repo, '003'), 'specs/003-dark-mode');
+  assert.equal(features.findAdoptable(repo, 'dark-mode'), 'specs/003-dark-mode');
+  assert.equal(features.findAdoptable(repo, 'specs/003-dark-mode/'), 'specs/003-dark-mode');
+  assert.equal(features.findAdoptable(repo, '004'), null);
+  features.registerFeature(repo, entry('r1', 'F1', '001', 'login'));
+  state.setCurrentRun(repo, 'r1');
+  mkdirSync(join(repo, '.specify'));
+  writeFileSync(join(repo, '.specify', 'feature.json'), JSON.stringify({ feature_directory: 'specs/003-dark-mode' }));
+  assert.deepEqual(features.resolveFeature(repo, { env: {} }), { adopt: 'specs/003-dark-mode' }, "Spec Kit's pointer beats the current-run fallback");
+  features.registerFeature(repo, entry('r2', 'F1', '003', 'dark-mode'));
+  assert.equal(features.findAdoptable(repo, '003'), null, 'once a run owns it, it resolves normally');
+  assert.equal((features.resolveFeature(repo, { env: {} }) as any).run, 'r2');
 });

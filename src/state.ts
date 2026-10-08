@@ -19,6 +19,8 @@ export type RunState = {
   mode?: 'single' | 'multi';
   /** Where a per-phase command asked the run to stop; every later `duetto run` honours it until replaced. */
   until?: { phase: string; feature?: string } | null;
+  /** A Spec Kit spec dir (written by /speckit-specify) this single-feature run took over. */
+  adopted?: { spec_dir: string } | null;
   created_at: string;
   updated_at: string;
 };

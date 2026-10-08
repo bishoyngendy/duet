@@ -23,6 +23,10 @@ Users who know Spec Kit can drive one phase at a time; each runs both models for
   current feature to the end of that phase. The feature comes from `--feature <NNN|slug|specs/dir>`, then
   `SPECIFY_FEATURE_DIRECTORY` / `SPECIFY_FEATURE`, then `.specify/feature.json`, the branch, or the current run.
 - The phase target is remembered: after a synthesis or answers pause, `duetto run --detach` still stops at it.
+- Users may edit `spec.md` / `plan.md` / `tasks.md` by hand between commands. Before implementation, the next command
+  asks you (host step "apply your edits to …") to fold the edit into the JSON; later phases are then redone.
+- A spec written with plain `/speckit-specify` is adopted automatically by the next phase command (via
+  `.specify/feature.json` or `--feature`): the first host step imports its spec.md faithfully.
 Map the user's words to these ("plan it", "/speckit-plan but with both models" → `duetto plan`). `duetto start` is
 the autopilot: every phase, and possibly several features.
 

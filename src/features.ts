@@ -1,6 +1,7 @@
 // Which feature a per-phase command (`duetto plan`, …) acts on. Features are indexed in .duetto/features.json as
 // they are created, and resolved in Spec Kit's order: explicit flag, SPECIFY_* env, .specify/feature.json, branch.
 
+import { readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { readFeatureDir } from './speckit.ts';
 import { currentRunId, duettoDir } from './state.ts';
@@ -39,7 +40,23 @@ function matches(e: FeatureEntry, token: string, currentRun: string | null): boo
   );
 }
 
-export function resolveFeature(repo: string, o: { flag?: string; env?: NodeJS.ProcessEnv; branch?: string } = {}): FeatureEntry {
+/**
+ * A spec dir written by Spec Kit itself (/speckit-specify) that no duetto run owns yet: `token` is a path, a dir
+ * name, its number or its slug. Returns the repo-relative dir.
+ */
+export function findAdoptable(repo: string, token: string): string | null {
+  const specs = join(repo, 'specs');
+  const t = token.replace(/\/+$/, '');
+  const name = basename(t);
+  const dirs = exists(specs) ? readdirSync(specs).filter((d) => exists(join(specs, d, 'spec.md'))) : [];
+  const dir = dirs.find((d) => d === name || d.startsWith(`${name}-`) || d.replace(/^\d+-/, '') === name);
+  if (!dir || listFeatures(repo).some((e) => basename(e.spec_dir) === dir)) return null;
+  return `specs/${dir}`;
+}
+
+export type Resolved = FeatureEntry | { adopt: string };
+
+export function resolveFeature(repo: string, o: { flag?: string; env?: NodeJS.ProcessEnv; branch?: string } = {}): Resolved {
   const env = o.env ?? process.env;
   const all = listFeatures(repo);
   const current = currentRunId(repo);
@@ -47,7 +64,9 @@ export function resolveFeature(repo: string, o: { flag?: string; env?: NodeJS.Pr
   for (const token of candidates) {
     const hit = [...all].reverse().find((e) => matches(e, token, current));
     if (hit) return hit;
-    if (token === o.flag) throw new Error(`No duetto feature matches "${token}". Known: ${all.map((e) => basename(e.spec_dir)).join(', ') || 'none'}`);
+    const adopt = findAdoptable(repo, token);
+    if (adopt) return { adopt };
+    if (token === o.flag) throw new Error(`No duetto feature or Spec Kit spec matches "${token}". Known: ${all.map((e) => basename(e.spec_dir)).join(', ') || 'none'}`);
   }
   const fromRun = all.filter((e) => e.run === current);
   const unfinished = fromRun.find((e) => !exists(join(duettoDir(repo), 'runs', e.run, 'features', e.feature, 'report.json')));

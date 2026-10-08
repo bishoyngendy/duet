@@ -64,6 +64,14 @@ folders. In a project with `.specify/` (from `specify init`), duetto:
 - resolves templates through Spec Kit's own `resolve-template.sh`, so overrides, presets and extensions apply;
 - numbers features the way Spec Kit's `create-new-feature.sh` does.
 
+You can mix it with plain Spec Kit:
+
+- **Hand edits.** Edit `spec.md`, `plan.md` or `tasks.md` between commands as you would with Spec Kit. Before
+  implementation starts, duetto folds your edit back into its structured artifacts and redoes what was planned from
+  the old version.
+- **Adoption.** Wrote a spec with `/speckit-specify`? Run `duetto clarify` or `duetto plan` (it follows
+  `.specify/feature.json`, or use `--feature 003`). Duetto imports that `spec.md` and both models take it from there.
+
 Without `.specify/`, duetto uses `.duetto/constitution.md` and bundled copies of Spec Kit's templates (MIT, see
 `templates/speckit/LICENSE`). It never creates `.specify/` itself: run `specify init --here` for that.
 
