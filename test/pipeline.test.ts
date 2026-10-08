@@ -366,8 +366,9 @@ test('--until pauses after a phase and a later run continues', async () => {
   const FD = join(ctx.dir, 'features', 'F1');
   assert.ok(existsSync(join(FD, 'plan.json')), 'plan phase finished');
   assert.ok(!existsSync(join(FD, 'tasks.json')), 'tasks phase not started');
-  assert.match(ctx.state.message, /Reached the end of plan\. Next: F1: break plan into tasks/);
-  await drive(ctx, hostScript, withConflict(() => 'suggested'));
+  assert.match(ctx.state.message, /Reached the end of plan\. Next: F1: break plan into tasks — run `duetto tasks` to continue\./);
+  assert.equal(await advance(ctx), 'paused', 'the target sticks: a plain run (e.g. after a host submit) stops there again');
+  await drive(ctx, hostScript, withConflict(() => 'suggested'), 200, { phase: 'converge' });
   assert.equal(ctx.state.status, 'done');
 });
 

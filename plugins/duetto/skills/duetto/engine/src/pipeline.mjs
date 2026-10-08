@@ -15,8 +15,9 @@ import { hostInstructions, workerPrompt } from './prompt.mjs';
 import * as render from './render.mjs';
 import { SCHEMAS,                                                                    } from './schemas.mjs';
 import { logEvent,               } from './state.mjs';
-import { appendLine, exec, exists, fmtMs, readJson, readText, sh, tail, topoSort, writeJson, writeText } from './util.mjs';
-import { detect, nextFeatureNumber, resolveTemplate } from './speckit.mjs';
+import { appendLine, exec, exists, fmtMs, readJson, readText, sh, slugify, tail, topoSort, writeJson, writeText } from './util.mjs';
+import { highestReserved, registerFeature } from './features.mjs';
+import { detect, nextFeatureNumber, resolveTemplate, writeFeatureDir } from './speckit.mjs';
 import { planWaves } from './waves.mjs';
 
                    
@@ -187,7 +188,8 @@ function* steps(ctx     )                  {
     prompt: () => workerPrompt('scanner', ctx.repo, { request: readText(request) }),
   });
 
-  yield* decompose(ctx);
+  if (ctx.state.mode === 'single') yield singleFeature(ctx);
+  else yield* decompose(ctx);
 
   const features = topoSort(readJson                         (join(D, 'decomposition.json')).features);
   let prev                 = null;
@@ -195,6 +197,24 @@ function* steps(ctx     )                  {
     yield* feature(ctx, f, prev);
     prev = f;
   }
+}
+
+/** `duetto specify`: the request is one feature, so decomposition is just bookkeeping. */
+function singleFeature(ctx     )       {
+  const out = join(ctx.dir, 'decomposition.json');
+  return {
+    id: 'decompose',
+    title: 'Single feature',
+    kind: 'deterministic',
+    done: () => exists(out),
+    run: async () => {
+      const request = readText(join(ctx.dir, 'request.md')).trim();
+      const title = request.split('\n')[0].slice(0, 80);
+      const d = { rationale: 'Single feature (duetto specify).', features: [{ id: 'F1', slug: slugify(request, 40), title, summary: request, scope: request, depends_on: [] }] };
+      writeJson(out, d);
+      writeText(join(ctx.dir, 'decomposition.md'), render.renderDecomposition(d));
+    },
+  };
 }
 
 function* decompose(ctx     )                  {
@@ -287,9 +307,12 @@ function* feature(ctx     , f         , prev                )                  {
     const branch = `duetto/${ctx.state.id}/${f.id}-${f.slug}`;
     if (!existsSync(wt)) await addWorktree(ctx.repo, wt, branch, baseSha);
     const specsRoot = join(wt, 'specs');
-    const number = nextFeatureNumber(specsRoot);
+    const number = String(Math.max(Number(nextFeatureNumber(specsRoot)), highestReserved(ctx.repo) + 1)).padStart(3, '0');
     await runSetup(ctx, wt);
     const meta              = { id: f.id, title: f.title, slug: f.slug, number, branch, worktree: wt, base: baseSha, specDir: join(specsRoot, `${number}-${f.slug}`) };
+    const specDir = `specs/${number}-${f.slug}`;
+    registerFeature(ctx.repo, { run: ctx.state.id, feature: f.id, spec_dir: specDir, branch, worktree: wt });
+    writeFeatureDir(wt, specDir); // Spec Kit's commands, run inside the worktree, find this feature
     return meta;
   });
   const meta = readJson             (p('feature.json'));

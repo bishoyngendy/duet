@@ -16,6 +16,16 @@ stores every artifact under `.duetto/runs/<run>/` and `specs/NNN-slug/`, runs gi
 pauses whenever it needs **you** (synthesis) or **the user** (decisions). You never do the research, planning or
 implementation yourself — the workers do. Your jobs: drive the loop, synthesize faithfully, ask the user well.
 
+## Spec Kit-style commands
+Users who know Spec Kit can drive one phase at a time; each runs both models for that phase, then stops (`paused`):
+- `duetto specify "<description>"`: new single feature; research and a spec draft.
+- `duetto clarify`, `duetto plan`, `duetto tasks`, `duetto analyze`, `duetto implement`, `duetto converge`: take the
+  current feature to the end of that phase. The feature comes from `--feature <NNN|slug|specs/dir>`, then
+  `SPECIFY_FEATURE_DIRECTORY` / `SPECIFY_FEATURE`, then `.specify/feature.json`, the branch, or the current run.
+- The phase target is remembered: after a synthesis or answers pause, `duetto run --detach` still stops at it.
+Map the user's words to these ("plan it", "/speckit-plan but with both models" → `duetto plan`). `duetto start` is
+the autopilot: every phase, and possibly several features.
+
 ## Start or resume
 - New idea: `duetto start "<idea>" --detach [--depth quick|standard|deep]` (standard by default; quick skips rebuttals and the
   challenge phase — suggest quick for small changes, deep for risky ones). First time in a repo it runs `duetto init`;

@@ -11,6 +11,7 @@ import { currentBranch, git, head, repoRoot } from './git.mjs';
 import { liveDir } from './live.mjs';
 import { openPanes } from './panes.mjs';
 import { PHASES,                      } from './pipeline.mjs';
+import { resolveFeature } from './features.mjs';
 import { constitutionPath, detect } from './speckit.mjs';
 import { runnerLog, watch } from './watch.mjs';
 import { SCHEMAS,                } from './schemas.mjs';
@@ -19,7 +20,13 @@ import { exists, fmtMs, readJson, readText, writeJson, writeText } from './util.
 
 const HELP = `duetto — Claude × Codex spec-driven orchestrator
 
-Usage:
+Spec Kit-style, one phase at a time (each runs Claude ∥ Codex for that phase, then stops):
+  duetto specify "<description>" [--depth quick|standard|deep]   New feature: research + spec draft
+  duetto clarify | plan | tasks | analyze | implement | converge  [--feature <NNN|slug|dir>]
+                                      Take the feature to the end of that phase
+  All of them accept --detach (run in the background; follow with: duetto watch --milestones).
+
+Autopilot and run control:
   duetto init                         Scaffold .duetto/ (config, constitution) in this repo
   duetto start "<idea>" [--depth quick|standard|deep] [--headless] [--no-run] [--detach]
   duetto run [--headless] [--detach] [--until <phase> [--feature F1]]
@@ -86,6 +93,24 @@ export async function main(argv          )                  {
   switch (cmd) {
     case 'init':
       return init(Boolean(v.force));
+    case 'specify': {
+      const desc = pos.join(' ').trim();
+      if (!desc) throw new Error('Usage: duetto specify "<feature description>"');
+      const ctx = await start(desc, (v.depth         ) ?? undefined, 'single');
+      return go(ctx, { phase: 'specify', feature: 'F1' }, v);
+    }
+    case 'clarify':
+    case 'plan':
+    case 'tasks':
+    case 'analyze':
+    case 'implement':
+    case 'converge': {
+      const repo = await projectRoot();
+      const entry = resolveFeature(repo, { flag: v.feature, branch: await currentBranch(repo).catch(() => undefined) });
+      setCurrentRun(repo, entry.run);
+      console.log(`${entry.spec_dir} (run ${entry.run}, ${entry.feature}) → ${cmd}`);
+      return go(await context(entry.run), { phase: cmd, feature: entry.feature }, v);
+    }
     case 'start': {
       const idea = pos.join(' ').trim();
       if (!idea) throw new Error('Usage: duetto start "<idea>"');
@@ -176,6 +201,14 @@ const exitFor = (s                    ) => (s === 'failed' ? 1 : 0);
  * Starts `duetto run` as its own process group with output to live/runner.log, and returns at once. The run
  * then survives the shell or session that started it; `duetto watch --milestones` follows it.
  */
+/** Advance (or detach) a run up to a phase; the target is remembered for later `duetto run`s. */
+async function go(ctx     , until       , v                                          )                  {
+  ctx.state.until = until;
+  saveState(ctx.dir, ctx.state);
+  if (v.detach) return detach(ctx, Boolean(v.headless), until);
+  return exitFor(await advance(ctx, { headless: v.headless, panes: !v.headless, until }));
+}
+
 function parseUntil(phase         , feature         )                    {
   if (!phase) {
     if (feature) throw new Error('--feature needs --until <phase>');
@@ -238,7 +271,7 @@ async function init(force         )                  {
   return 0;
 }
 
-async function start(idea        , depth        )               {
+async function start(idea        , depth        , mode                   = 'multi')               {
   const repo = await projectRoot();
   if (!exists(join(duettoDir(repo), 'config.json'))) await init(false);
   const config = loadConfig(repo);
@@ -258,6 +291,8 @@ async function start(idea        , depth        )               {
     message: null,
     base_commit: await head(repo),
     base_branch: await currentBranch(repo),
+    mode,
+    until: null,
     created_at: now,
     updated_at: now,
   };

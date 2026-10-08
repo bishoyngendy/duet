@@ -11,6 +11,23 @@ $duetto "add checkpoint reminders"        (Codex)
 > Formerly **duet**. Existing `.duet/` folders are moved to `.duetto/` automatically the first time you run
 > `duetto`; runs in progress carry on.
 
+## Commands
+
+Spec Kit-style, one phase at a time. Each runs Claude ∥ Codex for that phase, then stops:
+
+```sh
+duetto specify "add checkpoint reminders"   # research + spec draft → specs/NNN-add-checkpoint-reminders/
+duetto clarify                              # both models question the draft; your answers revise the spec
+duetto plan                                 # independent plans, rebuttal, synthesis, adversarial challenge
+duetto tasks                                # Spec Kit tasks.md; [P] tasks are implemented concurrently
+duetto implement                            # alternating implement → checks → cross-review per task
+duetto converge                             # whole-feature audit against the spec, then report.md
+```
+
+They act on the current feature: `--feature <NNN|slug|dir>`, else Spec Kit's `SPECIFY_FEATURE*` / `.specify/feature.json`,
+else the branch or the current run. `duetto start "<idea>"` is the autopilot: all phases, and it may split a big idea
+into several stacked features.
+
 ## How it works
 
 - **`duetto`** (this repo) is a deterministic engine: state, worker launching (`claude -p`, `codex exec`), git

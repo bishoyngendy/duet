@@ -15,6 +15,10 @@ export type RunState = {
   message: string | null;
   base_commit: string;
   base_branch: string;
+  /** 'single': one feature from `duetto specify` (no decomposition). Absent = the multi-feature autopilot. */
+  mode?: 'single' | 'multi';
+  /** Where a per-phase command asked the run to stop; every later `duetto run` honours it until replaced. */
+  until?: { phase: string; feature?: string } | null;
   created_at: string;
   updated_at: string;
 };

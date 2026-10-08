@@ -44,6 +44,8 @@ export function beyond(ctx: Ctx, step: Step, until: Until): boolean {
 
 export async function advance(ctx: Ctx, opts: { headless?: boolean; maxSteps?: number; panes?: boolean; until?: Until } = {}): Promise<Ctx['state']['status']> {
   const release = acquireLock(ctx.dir);
+  if (opts.until) ctx.state.until = opts.until;
+  const until = (ctx.state.until ?? undefined) as Until | undefined;
   let steps = 0;
   let announced = false;
   try {
@@ -55,11 +57,11 @@ export async function advance(ctx: Ctx, opts: { headless?: boolean; maxSteps?: n
         ctx.print('✔ run complete');
         return 'done';
       }
-      if (opts.until && beyond(ctx, step, opts.until)) {
-        const where = `${opts.until.feature ? `${opts.until.feature} ` : ''}${opts.until.phase}`;
-        setStatus(ctx, 'paused', step, `Reached the end of ${where}. Next: ${step.title}`);
-        logEvent(ctx.dir, { type: 'paused', step: step.id, until: opts.until });
-        ctx.print(`⏹ ${where} complete — next is ${step.title}`);
+      if (until && beyond(ctx, step, until)) {
+        const where = `${until.feature ? `${until.feature} ` : ''}${until.phase}`;
+        setStatus(ctx, 'paused', step, `Reached the end of ${where}. Next: ${step.title} — run \`duetto ${step.phase}\` to continue.`);
+        logEvent(ctx.dir, { type: 'paused', step: step.id, until });
+        ctx.print(`⏹ ${where} complete — next is ${step.title} (duetto ${step.phase})`);
         return 'paused';
       }
       if (opts.maxSteps !== undefined && steps++ >= opts.maxSteps) {
