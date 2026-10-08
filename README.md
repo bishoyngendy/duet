@@ -51,6 +51,12 @@ duetto panes                  # reopen the panes
 
 Transcripts live in `.duetto/runs/<run>/live/{claude,codex}.log`.
 
+The orchestrating session never runs the engine in its own shell. `duetto run --detach` starts an independent
+runner, and `duetto watch --milestones` follows it until it pauses. Every step line shows where the run is
+(`step 12 · F1 1/2 · T003 3/7 · 1h04m elapsed`). While a step runs, a `⏱` heartbeat (`ui.heartbeat_seconds`, default
+60) says what Claude and Codex are doing, and a `⚠` warning flags a worker that has been silent for
+`ui.stall_minutes` (default 10).
+
 ## Install
 
 Requires Node ≥ 20.17, `git`, and the `claude` and `codex` CLIs logged in. Nothing to `npm install`: the engine is

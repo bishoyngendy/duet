@@ -5,9 +5,10 @@
 //   --compact              both agents merged, one line per activity (pipes, Monitor)
 
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
-import { liveLog, readLiveStatus } from './live.mjs';
+import { join } from 'node:path';
+import { liveDir, liveLog, readLiveStatus } from './live.mjs';
                                               
-import { loadState } from './state.mjs';
+import { loadState, lockHolder } from './state.mjs';
 import { exists, fmtMs } from './util.mjs';
 
 const AGENTS              = ['claude', 'codex'];
@@ -126,7 +127,29 @@ async function splitView(dir        )                  {
   return 0;
 }
 
-export function watch(dir        , opts                                       )                  {
+export const runnerLog = (dir        ) => join(liveDir(dir), 'runner.log');
+
+/**
+ * Follows a detached runner's output (steps, heartbeats, pauses) and exits once the runner stops, ending with
+ * the run's status — so a watcher (e.g. Claude Code's Monitor) finishes exactly when the orchestrator is needed.
+ */
+export async function followMilestones(dir        , pollMs = POLL_MS)                  {
+  const next = tailer(runnerLog(dir));
+  const backlog = next().split('\n').filter((l) => l.trim());
+  for (const l of backlog.slice(-5)) console.log(l);
+  for (;;) {
+    const alive = lockHolder(dir) !== null;
+    for (const l of next().split('\n')) if (l.trim()) console.log(l);
+    if (!alive) break;
+    await sleep(pollMs);
+  }
+  const s = loadState(dir);
+  console.log(`■ ${s.status}${s.step ? ` — ${s.step.title}` : ''}${s.message ? ` — ${s.message}` : ''}`);
+  return 0;
+}
+
+export function watch(dir        , opts                                                             )                  {
+  if (opts.milestones) return followMilestones(dir);
   if (opts.agent) {
     if (!AGENTS.includes(opts.agent             )) throw new Error('--agent must be claude or codex');
     return followOne(dir, opts.agent             );

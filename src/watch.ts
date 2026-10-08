@@ -4,9 +4,10 @@
 //   --compact              both agents merged, one line per activity (pipes, Monitor)
 
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
-import { liveLog, readLiveStatus } from './live.ts';
+import { join } from 'node:path';
+import { liveDir, liveLog, readLiveStatus } from './live.ts';
 import type { AgentName } from './schemas.ts';
-import { loadState } from './state.ts';
+import { loadState, lockHolder } from './state.ts';
 import { exists, fmtMs } from './util.ts';
 
 const AGENTS: AgentName[] = ['claude', 'codex'];
@@ -125,7 +126,29 @@ async function splitView(dir: string): Promise<number> {
   return 0;
 }
 
-export function watch(dir: string, opts: { agent?: string; compact?: boolean }): Promise<number> {
+export const runnerLog = (dir: string) => join(liveDir(dir), 'runner.log');
+
+/**
+ * Follows a detached runner's output (steps, heartbeats, pauses) and exits once the runner stops, ending with
+ * the run's status — so a watcher (e.g. Claude Code's Monitor) finishes exactly when the orchestrator is needed.
+ */
+export async function followMilestones(dir: string, pollMs = POLL_MS): Promise<number> {
+  const next = tailer(runnerLog(dir));
+  const backlog = next().split('\n').filter((l) => l.trim());
+  for (const l of backlog.slice(-5)) console.log(l);
+  for (;;) {
+    const alive = lockHolder(dir) !== null;
+    for (const l of next().split('\n')) if (l.trim()) console.log(l);
+    if (!alive) break;
+    await sleep(pollMs);
+  }
+  const s = loadState(dir);
+  console.log(`■ ${s.status}${s.step ? ` — ${s.step.title}` : ''}${s.message ? ` — ${s.message}` : ''}`);
+  return 0;
+}
+
+export function watch(dir: string, opts: { agent?: string; compact?: boolean; milestones?: boolean }): Promise<number> {
+  if (opts.milestones) return followMilestones(dir);
   if (opts.agent) {
     if (!AGENTS.includes(opts.agent as AgentName)) throw new Error('--agent must be claude or codex');
     return followOne(dir, opts.agent as AgentName);

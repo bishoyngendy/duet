@@ -1,4 +1,5 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -9,22 +10,24 @@ import { currentBranch, git, head, repoRoot } from './git.ts';
 import { liveDir } from './live.ts';
 import { openPanes } from './panes.ts';
 import type { Ctx } from './pipeline.ts';
-import { watch } from './watch.ts';
+import { runnerLog, watch } from './watch.ts';
 import { SCHEMAS, type AgentName } from './schemas.ts';
-import { currentRunId, listRuns, loadState, logEvent, migrateLegacy, newRunId, duettoDir, runDir, saveState, setCurrentRun, type RunState } from './state.ts';
+import { currentRunId, listRuns, loadState, lockHolder, logEvent, migrateLegacy, newRunId, duettoDir, runDir, saveState, setCurrentRun, type RunState } from './state.ts';
 import { exists, fmtMs, readJson, readText, writeJson, writeText } from './util.ts';
 
 const HELP = `duetto — Claude × Codex spec-driven orchestrator
 
 Usage:
   duetto init                         Scaffold .duetto/ (config, constitution) in this repo
-  duetto start "<idea>" [--depth quick|standard|deep] [--headless] [--no-run]
-  duetto run [--headless]             Advance the current run until it needs the host or you
+  duetto start "<idea>" [--depth quick|standard|deep] [--headless] [--no-run] [--detach]
+  duetto run [--headless] [--detach]  Advance the current run until it needs the host or you
+                                      (--detach: in the background, independent of this shell)
   duetto status [--json]              Where the run is, what's pending, cost so far
   duetto next [--json]                The pending host task (synthesis) or questions for you
   duetto submit <file.json>           Submit the host's synthesis for the pending step
   duetto answer Q1=A Q2="free text" [--accept-suggested] [--file answers.json]
   duetto watch [--agent claude|codex] [--compact]   Live view of what Claude and Codex are doing
+  duetto watch --milestones           Follow a detached run's progress; exits when it pauses or ends
   duetto panes                        (Re)open live Claude/Codex panes in cmux or tmux
   duetto log [-n 40]                  Recent events
   duetto runs                         List runs;  duetto use <run-id> to switch
@@ -69,6 +72,8 @@ export async function main(argv: string[]): Promise<number> {
       n: { type: 'string', short: 'n' },
       force: { type: 'boolean' },
       compact: { type: 'boolean' },
+      milestones: { type: 'boolean' },
+      detach: { type: 'boolean' },
     },
   });
 
@@ -80,13 +85,17 @@ export async function main(argv: string[]): Promise<number> {
       if (!idea) throw new Error('Usage: duetto start "<idea>"');
       const ctx = await start(idea, (v.depth as Depth) ?? undefined);
       if (v['no-run']) return 0;
+      if (v.detach) return detach(ctx, Boolean(v.headless));
       return exitFor(await advance(ctx, { headless: v.headless, panes: !v.headless }));
     }
-    case 'run':
-      return exitFor(await advance(await context(v.run), { headless: v.headless, panes: !v.headless }));
+    case 'run': {
+      const ctx = await context(v.run);
+      if (v.detach) return detach(ctx, Boolean(v.headless));
+      return exitFor(await advance(ctx, { headless: v.headless, panes: !v.headless }));
+    }
     case 'watch': {
       const ctx = await context(v.run);
-      return watch(ctx.dir, { agent: v.agent, compact: v.compact });
+      return watch(ctx.dir, { agent: v.agent, compact: v.compact, milestones: v.milestones });
     }
     case 'panes': {
       const ctx = await context(v.run);
@@ -155,6 +164,27 @@ export async function main(argv: string[]): Promise<number> {
 }
 
 const exitFor = (s: RunState['status']) => (s === 'failed' ? 1 : 0);
+
+/**
+ * Starts `duetto run` as its own process group with output to live/runner.log, and returns at once. The run
+ * then survives the shell or session that started it; `duetto watch --milestones` follows it.
+ */
+function detach(ctx: Ctx, headless: boolean): number {
+  const holder = lockHolder(ctx.dir);
+  if (holder) {
+    console.log(`Already running (pid ${holder}). Follow it with: duetto watch --milestones`);
+    return 0;
+  }
+  mkdirSync(liveDir(ctx.dir), { recursive: true });
+  const log = openSync(runnerLog(ctx.dir), 'a');
+  const args = [process.argv[1], 'run', '--run', ctx.state.id, ...(headless ? ['--headless'] : [])];
+  const child = spawn(process.execPath, args, { cwd: ctx.repo, detached: true, stdio: ['ignore', log, log], env: process.env });
+  // Claim the lock for the child now, so a watcher started right after this sees a live runner.
+  writeText(join(ctx.dir, 'run.lock'), String(child.pid));
+  child.unref();
+  console.log(`Runner started (pid ${child.pid}). Follow it with: duetto watch --milestones`);
+  return 0;
+}
 
 async function init(force: boolean): Promise<number> {
   const repo = await projectRoot();

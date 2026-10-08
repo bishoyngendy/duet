@@ -15,4 +15,5 @@ export const activity = await load('activity');
 export const live = await load('live');
 export const panes = await load('panes');
 export const watchMod = await load('watch');
+export const progress = await load('progress');
 export const IMPL = built ? 'built' : 'source';

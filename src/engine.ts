@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { runAgent } from './agents/index.ts';
 import { liveCall } from './live.ts';
 import { openPanes } from './panes.ts';
+import { progressNote, startHeartbeat } from './progress.ts';
 import { pipeline, type Ctx, type Step } from './pipeline.ts';
 import { validate } from './schema.ts';
 import { SCHEMAS, type Answer, type MergedQ } from './schemas.ts';
@@ -32,7 +33,7 @@ export async function advance(ctx: Ctx, opts: { headless?: boolean; maxSteps?: n
   let announced = false;
   try {
     for (;;) {
-      const { step } = locate(ctx);
+      const { step, done } = locate(ctx);
       if (!step) {
         setStatus(ctx, 'done', null, 'All features complete.');
         logEvent(ctx.dir, { type: 'done' });
@@ -60,10 +61,22 @@ export async function advance(ctx: Ctx, opts: { headless?: boolean; maxSteps?: n
         announced = true;
         ctx.print(opts.panes ? await openPanes({ dir: ctx.dir, repo: ctx.repo, runId: ctx.state.id, mode: ctx.config.ui.panes }) : 'Watch Claude and Codex live: duetto watch');
       }
-      ctx.print(`▶ ${step.title}`);
-      logEvent(ctx.dir, { type: 'step_start', step: step.id });
-      if (step.kind === 'host') await runHostHeadless(ctx, step);
-      else await step.run!();
+      ctx.print(`▶ ${step.title}  [${progressNote(ctx.dir, step.id, done.length + 1, ctx.state.created_at)}]`);
+      logEvent(ctx.dir, { type: 'step_start', step: step.id, title: step.title });
+      const stopHeartbeat = startHeartbeat({
+        dir: ctx.dir,
+        stepId: step.id,
+        seconds: ctx.config.ui.heartbeat_seconds,
+        stallMinutes: ctx.config.ui.stall_minutes,
+        print: ctx.print,
+        log: (line) => logEvent(ctx.dir, { type: 'heartbeat', step: step.id, line }),
+      });
+      try {
+        if (step.kind === 'host') await runHostHeadless(ctx, step);
+        else await step.run!();
+      } finally {
+        stopHeartbeat();
+      }
       if (!step.done()) throw new Error(`Step ${step.id} finished without producing its output`);
       logEvent(ctx.dir, { type: 'step_done', step: step.id });
     }

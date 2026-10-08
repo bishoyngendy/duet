@@ -44,8 +44,11 @@ export function resolveAgent(cfg             , role        )                    
                                                                                 
                             
                                
-                                                                                                               
-                           
+     
+                                                                                                           
+                                                                                                                
+     
+                                                                             
   
 
 export const DEFAULT_CONFIG         = {
@@ -70,7 +73,7 @@ export const DEFAULT_CONFIG         = {
   checks: { setup: null, commands: [], timeout_minutes: 20 },
   protected_paths: ['.env', '.env.*', '**/.env', '**/.env.*', '**/*.pem', '**/*.key', '**/secrets/**', '.github/workflows/**'],
   worktrees_dir: null,
-  ui: { panes: 'auto' },
+  ui: { panes: 'auto', heartbeat_seconds: 60, stall_minutes: 10 },
 };
 
 function merge   (base   , over     )    {

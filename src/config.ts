@@ -43,8 +43,11 @@ export type Config = {
   checks: { setup: string | null; commands: string[]; timeout_minutes: number };
   protected_paths: string[];
   worktrees_dir: string | null;
-  /** panes: open live Claude/Codex panes next to the orchestrator ('auto' = in cmux or tmux when detected). */
-  ui: { panes: PanesMode };
+  /**
+   * panes: open live Claude/Codex panes next to the orchestrator ('auto' = in cmux or tmux when detected).
+   * heartbeat_seconds: progress line while a step runs (0 = off). stall_minutes: warn when a worker goes quiet.
+   */
+  ui: { panes: PanesMode; heartbeat_seconds: number; stall_minutes: number };
 };
 
 export const DEFAULT_CONFIG: Config = {
@@ -69,7 +72,7 @@ export const DEFAULT_CONFIG: Config = {
   checks: { setup: null, commands: [], timeout_minutes: 20 },
   protected_paths: ['.env', '.env.*', '**/.env', '**/.env.*', '**/*.pem', '**/*.key', '**/secrets/**', '.github/workflows/**'],
   worktrees_dir: null,
-  ui: { panes: 'auto' },
+  ui: { panes: 'auto', heartbeat_seconds: 60, stall_minutes: 10 },
 };
 
 function merge<T>(base: T, over: any): T {
