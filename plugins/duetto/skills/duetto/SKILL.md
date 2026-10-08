@@ -19,7 +19,10 @@ implementation yourself — the workers do. Your jobs: drive the loop, synthesiz
 ## Start or resume
 - New idea: `duetto start "<idea>" --detach [--depth quick|standard|deep]` (standard by default; quick skips rebuttals and the
   challenge phase — suggest quick for small changes, deep for risky ones). First time in a repo it runs `duetto init`;
-  tell the user to review `.duetto/config.json` (`checks.setup`, `checks.commands`) and `.duetto/constitution.md`.
+  tell the user to review `.duetto/config.json` (`checks.setup`, `checks.commands`) and the constitution file `init`
+  names. In a Spec Kit project (`.specify/` exists) duetto uses Spec Kit's constitution and templates. If there is no
+  `.specify/` but `specify` is on PATH, offer `specify init --here --integration claude` (or `codex`) first. Never run
+  it without the user's yes.
 - Existing run: `duetto status`, then `duetto run --detach`.
 
 ## Advancing and following a run

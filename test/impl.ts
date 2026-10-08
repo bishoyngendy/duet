@@ -16,4 +16,6 @@ export const live = await load('live');
 export const panes = await load('panes');
 export const watchMod = await load('watch');
 export const progress = await load('progress');
+export const speckit = await load('speckit');
+export const prompt = await load('prompt');
 export const IMPL = built ? 'built' : 'source';

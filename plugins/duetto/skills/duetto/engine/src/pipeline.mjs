@@ -16,6 +16,7 @@ import * as render from './render.mjs';
 import { SCHEMAS,                                                                    } from './schemas.mjs';
 import { logEvent,               } from './state.mjs';
 import { appendLine, exec, exists, fmtMs, readJson, readText, sh, tail, topoSort, writeJson, writeText } from './util.mjs';
+import { nextFeatureNumber } from './speckit.mjs';
 import { planWaves } from './waves.mjs';
 
                    
@@ -263,8 +264,7 @@ function* feature(ctx     , f         , prev                )                  {
     const branch = `duetto/${ctx.state.id}/${f.id}-${f.slug}`;
     if (!existsSync(wt)) await addWorktree(ctx.repo, wt, branch, baseSha);
     const specsRoot = join(wt, 'specs');
-    const used = existsSync(specsRoot) ? readdirSync(specsRoot).map((n) => Number(n.match(/^(\d{3})-/)?.[1] ?? 0)) : [];
-    const number = String(Math.max(0, ...used) + 1).padStart(3, '0');
+    const number = nextFeatureNumber(specsRoot);
     await runSetup(ctx, wt);
     const meta              = { id: f.id, title: f.title, slug: f.slug, number, branch, worktree: wt, base: baseSha, specDir: join(specsRoot, `${number}-${f.slug}`) };
     return meta;

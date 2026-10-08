@@ -15,6 +15,7 @@ import * as render from './render.ts';
 import { SCHEMAS, type AgentName, type Answer, type Feature, type MergedQ, type Task } from './schemas.ts';
 import { logEvent, type RunState } from './state.ts';
 import { appendLine, exec, exists, fmtMs, readJson, readText, sh, tail, topoSort, writeJson, writeText } from './util.ts';
+import { nextFeatureNumber } from './speckit.ts';
 import { planWaves } from './waves.ts';
 
 export type Ctx = {
@@ -262,8 +263,7 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     const branch = `duetto/${ctx.state.id}/${f.id}-${f.slug}`;
     if (!existsSync(wt)) await addWorktree(ctx.repo, wt, branch, baseSha);
     const specsRoot = join(wt, 'specs');
-    const used = existsSync(specsRoot) ? readdirSync(specsRoot).map((n) => Number(n.match(/^(\d{3})-/)?.[1] ?? 0)) : [];
-    const number = String(Math.max(0, ...used) + 1).padStart(3, '0');
+    const number = nextFeatureNumber(specsRoot);
     await runSetup(ctx, wt);
     const meta: FeatureMeta = { id: f.id, title: f.title, slug: f.slug, number, branch, worktree: wt, base: baseSha, specDir: join(specsRoot, `${number}-${f.slug}`) };
     return meta;

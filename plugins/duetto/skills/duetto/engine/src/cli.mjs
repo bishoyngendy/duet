@@ -2,7 +2,7 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createAgents, runAgent } from './agents/index.mjs';
 import { DEFAULT_CONFIG, detectChecks, loadConfig,            } from './config.mjs';
@@ -11,6 +11,7 @@ import { currentBranch, git, head, repoRoot } from './git.mjs';
 import { liveDir } from './live.mjs';
 import { openPanes } from './panes.mjs';
 import { PHASES,                      } from './pipeline.mjs';
+import { constitutionPath, detect } from './speckit.mjs';
 import { runnerLog, watch } from './watch.mjs';
 import { SCHEMAS,                } from './schemas.mjs';
 import { currentRunId, listRuns, loadState, lockHolder, logEvent, migrateLegacy, newRunId, duettoDir, runDir, saveState, setCurrentRun,               } from './state.mjs';
@@ -217,7 +218,10 @@ async function init(force         )                  {
     writeJson(cfgPath, { ...DEFAULT_CONFIG, checks: detectChecks(repo) });
     console.log(`wrote ${cfgPath}`);
   }
-  if (!exists(constPath) || force) {
+  const sk = detect(repo);
+  if (sk.present && exists(join(repo, '.specify', 'memory', 'constitution.md'))) {
+    console.log(`Spec Kit project${sk.integration ? ` (${sk.integration})` : ''}: using its constitution at .specify/memory/constitution.md`);
+  } else if (!exists(constPath) || force) {
     writeText(constPath, readFileSync(join(import.meta.dirname, '..', 'templates', 'constitution.md'), 'utf8'));
     console.log(`wrote ${constPath}`);
   }
@@ -229,7 +233,8 @@ async function init(force         )                  {
     writeText(gi, current + (current && !current.endsWith('\n') ? '\n' : '') + `# duetto\n${missing.join('\n')}\n`);
     console.log('updated .gitignore');
   }
-  console.log('\nReview .duetto/config.json (checks.setup / checks.commands) and .duetto/constitution.md, then: duetto start "<idea>"');
+  const constitutionFile = relative(repo, constitutionPath(repo));
+  console.log(`\nReview .duetto/config.json (checks.setup / checks.commands) and ${constitutionFile}, then: duetto start "<idea>"`);
   return 0;
 }
 

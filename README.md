@@ -36,6 +36,19 @@ per feature, in dependency order, on a stacked branch + worktree:
 
 `--depth quick` skips rebuttals and challenge and does one clarify round; `deep` does three.
 
+## Spec Kit
+
+Duetto is built to sit on top of [GitHub Spec Kit](https://github.com/github/spec-kit). It follows the same phases
+(specify → clarify → plan → tasks → implement → converge) and writes features to the same `specs/NNN-name/`
+folders. In a project with `.specify/` (from `specify init`), duetto:
+
+- gives every agent Spec Kit's constitution (`.specify/memory/constitution.md`);
+- resolves templates through Spec Kit's own `resolve-template.sh`, so overrides, presets and extensions apply;
+- numbers features the way Spec Kit's `create-new-feature.sh` does.
+
+Without `.specify/`, duetto uses `.duetto/constitution.md` and bundled copies of Spec Kit's templates (MIT, see
+`templates/speckit/LICENSE`). It never creates `.specify/` itself: run `specify init --here` for that.
+
 ## Watching Claude and Codex live
 
 Every worker streams what it is doing: thinking, commands, files read or edited, searches. In cmux or tmux, `duetto run`

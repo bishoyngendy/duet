@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { constitutionPath } from './speckit.ts';
 import { readText } from './util.ts';
 
 const PROMPTS = join(import.meta.dirname, '..', 'prompts');
@@ -7,7 +8,7 @@ export const promptPath = (name: string) => join(PROMPTS, `${name}.md`);
 export const loadPrompt = (name: string) => readFileSync(promptPath(name), 'utf8').trim();
 
 export function constitution(repo: string): string {
-  return readText(join(repo, '.duetto', 'constitution.md'), '(no constitution defined)').trim();
+  return readText(constitutionPath(repo), '(no constitution defined)').trim();
 }
 
 /** Inputs are embedded verbatim so both models receive byte-identical context. */
