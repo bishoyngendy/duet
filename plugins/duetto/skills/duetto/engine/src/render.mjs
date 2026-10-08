@@ -37,7 +37,12 @@ export function renderResearch(r     )         {
 
                                                                                             
 
-const sections = (extra                   ) => (extra ?? []).flatMap((x     ) => [`## ${x.heading}`, x.body]);
+/** Template sections with no field of their own, minus any heading the renderer already produced. */
+function sections(extra                   , parts          )           {
+  const norm = (h        ) => h.replace(/^#+\s*/, '').trim().toLowerCase();
+  const have = new Set(parts.filter((p) => /^#+ /.test(p)).map(norm));
+  return (extra ?? []).filter((x     ) => !have.has(norm(x.heading))).flatMap((x     ) => [`## ${x.heading}`, x.body]);
+}
 const scenario = (a     ) => `**Given** ${a.given}, **When** ${a.when}, **Then** ${a.then} _(${a.id})_`;
 
 /** spec.md in Spec Kit's layout (spec-template.md). Specs from before Spec Kit fields render too. */
@@ -55,7 +60,7 @@ export function renderSpec(s     , meta          = {})         {
     ].join('\n\n');
   });
   const loose = acs.filter((a) => !a.story || !(s.user_stories ?? []).some((u     ) => u.id === a.story && u.priority));
-  return [
+  const parts = [
     `# Feature Specification: ${s.title}`,
     [
       meta.branch && `**Feature Branch**: \`${meta.branch}\``,
@@ -82,8 +87,8 @@ export function renderSpec(s     , meta          = {})         {
     '## Out of Scope',
     list(s.out_of_scope ?? []),
     ...((s.needs_clarification ?? []).length ? ['## Open Questions', list(s.needs_clarification.map((q        ) => `[NEEDS CLARIFICATION: ${q}]`))] : []),
-    ...sections(s.extra_sections),
-  ].join('\n\n');
+  ];
+  return [...parts, ...sections(s.extra_sections, parts)].join('\n\n');
 }
 
 const notNone = (v                    ) => Boolean(v && !/^\s*(none|n\/a)\.?\s*$/i.test(v));
@@ -156,7 +161,7 @@ export function renderPlan(p     , extra                                        
   if (justified.length) {
     parts.push('## Complexity Tracking', '| Violation | Why Needed / Simpler Alternative Rejected Because |\n|---|---|\n' + justified.map((c     ) => `| ${c.principle} | ${c.note} |`).join('\n'));
   }
-  parts.push(...sections(p.extra_sections));
+  parts.push(...sections(p.extra_sections, parts));
   if (extra?.conflicts?.length) {
     parts.push(
       '## Claude vs Codex conflicts',

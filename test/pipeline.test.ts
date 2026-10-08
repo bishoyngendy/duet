@@ -480,3 +480,24 @@ test('a spec written with Spec Kit is adopted: imported, then researched, clarif
   assert.equal(readJson(join(ctx.dir, 'decomposition.json')).features[0].title, 'Dark mode');
   assert.ok(existsSync(join(meta.specDir, 'plan.md')));
 });
+
+test('workspace "inplace": a single feature is built on a Spec Kit-style NNN-slug branch in the checkout', async () => {
+  const repo = gitRepo();
+  const ctx = makeRun(repo, { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick', config: { workspace: 'inplace' } });
+  ctx.state.mode = 'single';
+  writeFileSync(join(ctx.dir, 'request.md'), 'dark mode\n');
+  await drive(ctx, hostScript, withConflict(() => 'suggested'), 200, { phase: 'converge' });
+  assert.equal(ctx.state.status, 'done');
+  const meta = readJson(join(ctx.dir, 'features', 'F1', 'feature.json'));
+  assert.equal(meta.worktree, repo);
+  assert.equal(meta.branch, '001-dark-mode');
+  assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD'), '001-dark-mode');
+  assert.ok(existsSync(join(repo, 'specs', '001-dark-mode', 'tasks.md')));
+  assert.match(git(repo, 'log', '--format=%s'), /feat\(001\/T002\): Wire up/);
+
+  const dirtyRepo = gitRepo();
+  writeFileSync(join(dirtyRepo, 'src', 'index.ts'), 'export const x = 2;\n');
+  const dirty = makeRun(dirtyRepo, { claude: new FakeAgent('claude'), codex: new FakeAgent('codex') }, { depth: 'quick', config: { workspace: 'inplace' } });
+  dirty.state.mode = 'single';
+  await assert.rejects(drive(dirty, hostScript, () => 'suggested', 200, { phase: 'specify' }), /needs it clean; commit or stash first:\n M src\/index\.ts/);
+});

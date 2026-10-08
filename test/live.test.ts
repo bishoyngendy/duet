@@ -34,6 +34,7 @@ test('codex --json events become activities (shapes from a real run)', () => {
   assert.deepEqual(codexActivity({ type: 'item.completed', item: { type: 'file_change', changes: [{ path: '/wt/src/a.ts', kind: 'update' }] } }, cwd), [{ kind: 'file', text: 'update src/a.ts' }]);
   assert.deepEqual(codexActivity({ type: 'item.started', item: { type: 'web_search', query: '' } }), [], 'empty query at start');
   assert.deepEqual(codexActivity({ type: 'item.completed', item: { type: 'web_search', query: '', action: { queries: ['nav3 scenes'] } } }), [{ kind: 'search', text: 'web: nav3 scenes' }]);
+  assert.equal(codexActivity({ type: 'item.completed', item: { type: 'agent_message', text: '{ "summary": "x" }' } })[0].kind, 'answer', 'final JSON answer');
   assert.equal(codexActivity({ type: 'item.completed', item: { type: 'mcp_tool_call', server: 'cua', tool: 'js', title: 'Open board' } })[0].text, 'cua.js — Open board');
   assert.deepEqual(codexActivity({ type: 'turn.completed', usage: {} }), []);
 });

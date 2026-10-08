@@ -56,6 +56,9 @@ test('plan.md has Spec Kit sections and writes data-model, quickstart and contra
   for (const h of ['# Implementation Plan: Farewells', '**Branch**: `001-farewells` | **Date**: 2026-10-08 | **Spec**: [spec.md](spec.md)', '## Technical Context', '**Language/Version**: TypeScript 5', '## Constitution Check', '| Simplicity | ✅ pass | one function |', '## Project Structure', '├── data-model.md', '├── contracts/', 'src/\n└── greet.ts', '## Complexity Tracking', '| No new deps | needs Intl |']) {
     assert.ok(md.includes(h), `missing ${h}`);
   }
+  const dup = render.renderPlan({ ...plan, extra_sections: [{ heading: 'Complexity Tracking', body: 'again' }, { heading: 'Rollback', body: 'r' }] });
+  assert.equal(dup.match(/^## Complexity Tracking$/gm)!.length, 1, 'template sections we already render are not repeated');
+  assert.match(dup, /## Rollback\n\nr/);
   assert.deepEqual(Object.keys(render.planFiles(plan, 'Farewells')).sort(), ['contracts/escape.md', 'data-model.md', 'quickstart.md'], 'contract paths cannot escape contracts/');
 });
 

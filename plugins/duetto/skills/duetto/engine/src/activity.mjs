@@ -69,7 +69,9 @@ export function codexActivity(e     , cwd = '')             {
     case 'reasoning':
       return done && it.text?.trim() ? [{ kind: 'thinking', text: it.text }] : [];
     case 'agent_message':
-      return done && it.text?.trim() ? [{ kind: 'message', text: it.text }] : [];
+      if (!done || !it.text?.trim()) return [];
+      // The final message under --output-schema is the JSON answer itself.
+      return it.text.trim().startsWith('{') ? [{ kind: 'answer', text: 'returned its structured answer' }] : [{ kind: 'message', text: it.text }];
     case 'file_change':
       return done ? [{ kind: 'file', text: (it.changes ?? []).map((c     ) => `${c.kind} ${rel(c.path, cwd)}`).join(', ') || 'file change' }] : [];
     case 'web_search': {

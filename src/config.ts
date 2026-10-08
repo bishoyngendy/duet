@@ -44,6 +44,12 @@ export type Config = {
   protected_paths: string[];
   worktrees_dir: string | null;
   /**
+   * Where a feature is built. 'worktree' (default): its own git worktree and branch, your checkout untouched.
+   * 'inplace' (single-feature `duetto specify` runs): a Spec Kit-style NNN-slug branch in your checkout, which must
+   * be clean and which duetto commits to. Parallel tasks still use their own worktrees.
+   */
+  workspace: 'worktree' | 'inplace';
+  /**
    * panes: open live Claude/Codex panes next to the orchestrator ('auto' = in cmux or tmux when detected).
    * heartbeat_seconds: progress line while a step runs (0 = off). stall_minutes: warn when a worker goes quiet.
    */
@@ -72,6 +78,7 @@ export const DEFAULT_CONFIG: Config = {
   checks: { setup: null, commands: [], timeout_minutes: 20 },
   protected_paths: ['.env', '.env.*', '**/.env', '**/.env.*', '**/*.pem', '**/*.key', '**/secrets/**', '.github/workflows/**'],
   worktrees_dir: null,
+  workspace: 'worktree',
   ui: { panes: 'auto', heartbeat_seconds: 60, stall_minutes: 10 },
 };
 

@@ -321,15 +321,29 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
   const quick = depth === 'quick';
 
   // ── setup: stacked worktree/branch, spec number, dependency install
-  yield det(`${f.id}/setup`, `${f.id}: create worktree`, p('feature.json'), async () => {
+  const inplace = ctx.config.workspace === 'inplace' && ctx.state.mode === 'single';
+  yield det(`${f.id}/setup`, inplace ? `${f.id}: create feature branch` : `${f.id}: create worktree`, p('feature.json'), async () => {
     const base = prev ? (readJson<FeatureMeta>(join(ctx.dir, 'features', prev.id, 'feature.json')).branch) : ctx.state.base_commit;
     const baseSha = await git(ctx.repo, 'rev-parse', base);
-    const wt = worktreePath(ctx.repo, ctx.config.worktrees_dir, ctx.state.id, f.id);
-    const branch = `duetto/${ctx.state.id}/${f.id}-${f.slug}`;
-    if (!existsSync(wt)) await addWorktree(ctx.repo, wt, branch, baseSha);
-    const specsRoot = join(wt, 'specs');
     const adopted = ctx.state.adopted?.spec_dir;
-    const number = adopted ? basename(adopted).match(/^(\d+)-/)?.[1] ?? '000' : String(Math.max(Number(nextFeatureNumber(specsRoot)), highestReserved(ctx.repo) + 1)).padStart(3, '0');
+    const numberIn = (specsRoot: string) =>
+      adopted ? (basename(adopted).match(/^(\d+)-/)?.[1] ?? '000') : String(Math.max(Number(nextFeatureNumber(specsRoot)), highestReserved(ctx.repo) + 1)).padStart(3, '0');
+    let wt: string, branch: string, number: string;
+    if (inplace) {
+      // Spec Kit's own flow: a NNN-slug branch in the user's checkout (like its git extension).
+      const dirty = (await git(ctx.repo, 'status', '--porcelain')).split('\n').filter((l) => l && !/\.duetto\/|\.gitignore$|\.specify\/feature\.json$/.test(l));
+      if (dirty.length) throw new Error(`workspace "inplace" works in your checkout and needs it clean; commit or stash first:\n${dirty.slice(0, 8).join('\n')}`);
+      wt = ctx.repo;
+      number = numberIn(join(wt, 'specs'));
+      branch = `${number}-${f.slug}`;
+      const exists_ = (await exec('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: ctx.repo })).code === 0;
+      await git(ctx.repo, 'checkout', ...(exists_ ? [branch] : ['-b', branch, baseSha]));
+    } else {
+      wt = worktreePath(ctx.repo, ctx.config.worktrees_dir, ctx.state.id, f.id);
+      branch = `duetto/${ctx.state.id}/${f.id}-${f.slug}`;
+      if (!existsSync(wt)) await addWorktree(ctx.repo, wt, branch, baseSha);
+      number = numberIn(join(wt, 'specs'));
+    }
     await runSetup(ctx, wt);
     const specDir = adopted ?? `specs/${number}-${f.slug}`;
     const meta: FeatureMeta = { id: f.id, title: f.title, slug: f.slug, number, branch, worktree: wt, base: baseSha, specDir: join(wt, specDir) };

@@ -20,4 +20,5 @@ export const speckit = await load('speckit');
 export const prompt = await load('prompt');
 export const render = await load('render');
 export const features = await load('features');
+export const IS_BUILT = Boolean(process.env.DUETTO_TEST_BUILT);
 export const IMPL = built ? 'built' : 'source';
