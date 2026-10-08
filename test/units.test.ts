@@ -120,3 +120,11 @@ test('a pre-rename .duet/ folder moves to .duetto/ once, with its .gitignore lin
   assert.equal(readFileSync(join(repo, '.gitignore'), 'utf8'), 'node_modules\n# duetto\n.duetto/runs/\n.duetto/current\n');
   assert.equal(state.migrateLegacy(repo), false, 'second call is a no-op');
 });
+
+test('slugify cuts long names at a word boundary', () => {
+  const { slugify } = util;
+  assert.equal(slugify('add a farewell(name) function next to greet, exported from src', 40), 'add-a-farewellname-function-next-to');
+  assert.equal(slugify('Short Name!'), 'short-name');
+  assert.equal(slugify('x'.repeat(50), 40), 'x'.repeat(40), 'no boundary: hard cut');
+  assert.equal(slugify('???'), 'run');
+});

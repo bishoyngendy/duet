@@ -34,16 +34,17 @@ export function appendLine(p: string, line: string): void {
 export const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
 export function slugify(s: string, max = 40): string {
-  return (
-    s
-      .toLowerCase()
-      .normalize('NFKD')
-      .replace(/[^\w\s-]/g, '')
-      .trim()
-      .replace(/[\s_-]+/g, '-')
-      .slice(0, max)
-      .replace(/-+$/, '') || 'run'
-  );
+  const full = s
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/[\s_-]+/g, '-');
+  if (full.length <= max) return full.replace(/-+$/, '') || 'run';
+  // Cut at a word boundary so names don't end in half a word ("next-to-gree").
+  const cut = full.slice(0, max + 1);
+  const atWord = cut.lastIndexOf('-') > max / 2 ? cut.slice(0, cut.lastIndexOf('-')) : full.slice(0, max);
+  return atWord.replace(/-+$/, '') || 'run';
 }
 
 export function tail(s: string, n = 4000): string {
