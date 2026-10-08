@@ -16,7 +16,7 @@ import * as render from './render.mjs';
 import { SCHEMAS,                                                                    } from './schemas.mjs';
 import { logEvent,               } from './state.mjs';
 import { appendLine, exec, exists, fmtMs, readJson, readText, sh, tail, topoSort, writeJson, writeText } from './util.mjs';
-import { nextFeatureNumber } from './speckit.mjs';
+import { detect, nextFeatureNumber, resolveTemplate } from './speckit.mjs';
 import { planWaves } from './waves.mjs';
 
                    
@@ -156,7 +156,7 @@ export function phaseOf(id        )                                     {
   if (id.startsWith('decompose')) return { phase: 'decompose' };
   const [feature, rest = ''] = [id.slice(0, id.indexOf('/')), id.slice(id.indexOf('/') + 1)];
   const table                    = [
-    [/^(setup|research|specify$)/, 'specify'],
+    [/^(setup|templates|research|specify$)/, 'specify'],
     [/^(clarify-|specify-revise)/, 'clarify'],
     [/^(plan|challenge)/, 'plan'],
     [/^(tasks|spec-commit|waves)$/, 'tasks'],
@@ -250,6 +250,29 @@ function* decompose(ctx     )                  {
 
                                                                                                                                                 
 
+/** Renders a feature's Spec Kit documents into its specs/NNN-slug/ dir. */
+function docs(ctx     , FD        , meta             ) {
+  const w = (n        , c        ) => writeText(join(meta.specDir, n), c);
+  const finalSpec = join(FD, 'spec-final.json');
+  const specFile = () => (exists(finalSpec) ? finalSpec : join(FD, 'spec.json'));
+  const docMeta = () => ({ branch: meta.branch, request: readText(join(ctx.dir, 'request.md')), date: ctx.state.created_at.slice(0, 10) });
+  return {
+    spec: (d = readJson(specFile())) => w('spec.md', render.renderSpec(d, { ...docMeta(), status: exists(finalSpec) ? 'Clarified' : 'Draft' })),
+    plan: (plan     , extra                                          ) => {
+      const title = readJson(specFile()).title;
+      w('plan.md', render.renderPlan(plan, extra, { ...docMeta(), title }));
+      for (const [name, content] of Object.entries(render.planFiles(plan, title))) w(name, content);
+    },
+    tasks: (assignments                        , alsoDone           = []) => {
+      const tasksDir = join(FD, 'tasks');
+      const done = new Set([...(existsSync(tasksDir) ? readdirSync(tasksDir).filter((t) => exists(join(tasksDir, t, 'commit.json'))) : []), ...alsoDone]);
+      const waves = exists(join(FD, 'waves.json')) ? readJson(join(FD, 'waves.json')).waves : undefined;
+      const specDir = meta.specDir.startsWith(meta.worktree + '/') ? meta.specDir.slice(meta.worktree.length + 1) : meta.specDir;
+      w('tasks.md', render.renderTasks(readJson(join(FD, 'tasks.json')), { assignments, spec: readJson(specFile()), waves, done, specDir }));
+    },
+  };
+}
+
 function* feature(ctx     , f         , prev                )                  {
   const FD = join(ctx.dir, 'features', f.id);
   const p = (name        ) => join(FD, name);
@@ -272,6 +295,13 @@ function* feature(ctx     , f         , prev                )                  {
   const meta = readJson             (p('feature.json'));
   const wt = meta.worktree;
   const md = (name        , content        ) => writeText(join(meta.specDir, name), content);
+  const doc = docs(ctx, FD, meta);
+
+  // ── the project's Spec Kit templates (or bundled copies), as structure guides for the host
+  yield det(`${f.id}/templates`, `${f.id}: resolve Spec Kit templates`, p('templates/resolved.json'), async () => {
+    for (const name of ['spec-template', 'plan-template', 'tasks-template']         ) writeText(p(`templates/${name}.md`), await resolveTemplate(ctx.repo, name));
+    return { speckit: detect(ctx.repo) };
+  });
   const ctxInputs = () => ({ request: readText(join(ctx.dir, 'request.md')), feature: f, codebase_scans: { claude: readJson(join(ctx.dir, 'scan.claude.json')), codex: readJson(join(ctx.dir, 'scan.codex.json')) } });
 
   // ── research: independent → rebuttal → host synthesis
@@ -312,10 +342,10 @@ function* feature(ctx     , f         , prev                )                  {
   // ── spec draft first, then clarify against it (Spec Kit's order: specify → clarify)
   yield host(`${f.id}/specify`, `${f.id}: write spec`, {
     instructions: hostInstructions('specify'),
-    inputs: { request: join(ctx.dir, 'request.md'), decomposition: join(ctx.dir, 'decomposition.json'), research: p('research.json') },
+    inputs: { request: join(ctx.dir, 'request.md'), decomposition: join(ctx.dir, 'decomposition.json'), research: p('research.json'), spec_template: p('templates/spec-template.md') },
     schema: 'Spec',
     output: p('spec.json'),
-    after: (d) => md('spec.md', render.renderSpec(d)),
+    after: (d) => doc.spec(d),
   });
 
   // ── clarification rounds against the draft
@@ -356,10 +386,10 @@ function* feature(ctx     , f         , prev                )                  {
   if (answered.length && (exists(specFinal) || !exists(p('plan.claude.json')))) {
     yield host(`${f.id}/specify-revise`, `${f.id}: revise spec with your answers`, {
       instructions: hostInstructions('specify-revise'),
-      inputs: { spec_draft: p('spec.json'), ...answerInputs(FD) },
+      inputs: { spec_draft: p('spec.json'), spec_template: p('templates/spec-template.md'), ...answerInputs(FD) },
       schema: 'Spec',
       output: specFinal,
-      after: (d) => md('spec.md', render.renderSpec(d)),
+      after: (d) => doc.spec(d),
     });
   }
   const specPath = exists(specFinal) ? specFinal : p('spec.json');
@@ -396,6 +426,7 @@ function* feature(ctx     , f         , prev                )                  {
       plan_codex: p('plan.codex.json'),
       rebuttal_claude: quick ? null : p('plan-rebuttal.claude.json'),
       rebuttal_codex: quick ? null : p('plan-rebuttal.codex.json'),
+      plan_template: p('templates/plan-template.md'),
       ...answerInputs(FD),
     }),
     schema: 'PlanSynthesis',
@@ -433,7 +464,7 @@ function* feature(ctx     , f         , prev                )                  {
   // ── tasks DAG
   yield host(`${f.id}/tasks`, `${f.id}: break plan into tasks`, {
     instructions: hostInstructions('tasks'),
-    inputs: { spec: specPath, plan: finalPlan },
+    inputs: { spec: specPath, plan: finalPlan, tasks_template: p('templates/tasks-template.md') },
     schema: 'Tasks',
     output: p('tasks.json'),
     postprocess: (d) => {
@@ -447,19 +478,20 @@ function* feature(ctx     , f         , prev                )                  {
   const assignment                            = {};
   tasks.forEach((t, i) => (assignment[t.id] = i % 2 === 0 ? ctx.config.first_implementer : other(ctx.config.first_implementer)));
 
-  yield det(`${f.id}/spec-commit`, `${f.id}: commit spec artifacts`, p('spec-commit.json'), async () => {
-    renderAll(FD, meta, finalPlan, assignment);
-    const sha = await commitAll(wt, `docs(${meta.number}): spec, plan and tasks for ${f.title}\n\nGenerated by duetto run ${ctx.state.id}.`);
-    return { sha };
-  });
-
-  // ── implement: alternate implementer/reviewer per task; independent tasks run concurrently in waves.
+  // ── waves: independent tasks run concurrently (scheduled before the spec commit so tasks.md can mark [P]).
   // Already-started tasks (a run resumed after upgrading) stay solo in the feature worktree they began in.
   yield det(`${f.id}/waves`, `${f.id}: schedule tasks`, p('waves.json'), async () => ({
     waves: planWaves(tasks, ctx.config.parallel_tasks, (t) => exists(join(FD, 'tasks', t.id, 'base.json'))).map((w) => w.map((t) => t.id)),
   }));
+  yield det(`${f.id}/spec-commit`, `${f.id}: commit spec artifacts`, p('spec-commit.json'), async () => {
+    renderAll(ctx, FD, meta, finalPlan, assignment);
+    const sha = await commitAll(wt, `docs(${meta.number}): spec, plan and tasks for ${f.title}\n\nGenerated by duetto run ${ctx.state.id}.`);
+    return { sha };
+  });
+
+  // ── implement: alternate implementer/reviewer per task
   const waves = readJson                       (p('waves.json')).waves.map((ids) => ids.map((id) => tasks.find((t) => t.id === id) ));
-  const shared = { ctx, FD, meta, spec: () => readJson(specPath), plan, tasks };
+  const shared = { ctx, FD, meta, spec: () => readJson(specPath), plan, tasks, assignment };
   for (const [i, wave] of waves.entries()) {
     if (wave.length === 1) yield* taskLoop(shared, wave[0], assignment[wave[0].id]);
     else yield* parallelWave(shared, `W${i + 1}`, wave, assignment);
@@ -538,7 +570,7 @@ function* feature(ctx     , f         , prev                )                  {
     });
     const lastConv = lastNumbered(FD, 'converge-', '.json', (n) => !n.includes('decision'));
     const lastChecks = lastNumbered(FD, 'final-checks-', '.json');
-    renderAll(FD, meta, finalPlan, assignment);
+    renderAll(ctx, FD, meta, finalPlan, assignment);
     md('report.md', render.renderReport({ feature: f, tasks: rows, converge: lastConv ? readJson(lastConv) : { status: '?', summary: '', acceptance: [], findings: [] }, checks: lastChecks ? readJson(lastChecks) : null }));
     const sha = await commitAll(wt, `docs(${meta.number}): duetto report for ${f.title}`);
     return { sha, branch: meta.branch, worktree: wt };
@@ -547,7 +579,7 @@ function* feature(ctx     , f         , prev                )                  {
 
 // ───────────────────────────── task loop ─────────────────────────────
 
-                                                                                                           
+                                                                                                                                                  
 
 function* taskLoop(s        , t      , impl           , wt = s.meta.worktree)                  {
   const { ctx, meta } = s;
@@ -697,6 +729,8 @@ function* taskLoop(s        , t      , impl           , wt = s.meta.worktree)   
 
   const rounds = countRounds(TD);
   yield det(`${id}/commit`, `${id}: commit`, p('commit.json'), async () => {
+    // Tick the task in tasks.md in the same commit (parallel-wave tasks are ticked when merged).
+    if (wt === meta.worktree && s.tasks.some((x) => x.id === t.id)) docs(ctx, s.FD, meta).tasks(s.assignment, [t.id]);
     const sha = await commitAll(
       wt,
       `feat(${meta.number}/${t.id}): ${t.title}\n\nImplemented-by: ${impl}\nReviewed-by: ${rev}\nReview-rounds: ${rounds}${accepted ? '\nAccepted-with-open-findings: yes' : ''}\nDuetto-run: ${ctx.state.id}`,
@@ -769,6 +803,7 @@ function* parallelWave(s        , wid        , wave        , assignment         
       if (merged[t.id].status === 'conflict') ctx.print(`    ${t.id} conflicts with the merged work — it will be redone on top of it`);
       else await removeWorktree(ctx.repo, taskWt(t), taskBranch(t));
     }
+    docs(ctx, s.FD, meta).tasks(s.assignment); // ticks the merged tasks; committed with the next task or the report
     return merged;
   });
   const merged = readJson(join(WD, 'merge.json'));
@@ -832,7 +867,7 @@ function* decided(
     },
     after: (d) => {
       if (!d.questions.length) writeJson(o.final, { plan: d.plan });
-      writeText(join(meta.specDir, 'plan.md'), render.renderPlan(d.plan, d));
+      docs(ctx, FD, meta).plan(d.plan, d);
     },
   });
   const synth = readJson(o.synth);
@@ -848,7 +883,7 @@ function* decided(
     inputs: { synthesis: o.synth, decisions: o.answers },
     schema: 'PlanFinal',
     output: o.final,
-    after: (d) => writeText(join(meta.specDir, 'plan.md'), render.renderPlan(d.plan, synth)),
+    after: (d) => docs(ctx, FD, meta).plan(d.plan, synth),
   });
 }
 
@@ -910,14 +945,14 @@ function renderDecisionsMd(FD        , meta             ) {
   writeText(join(meta.specDir, 'decisions.md'), render.renderDecisions(entries));
 }
 
-function renderAll(FD        , meta             , finalPlan        , assignment                        ) {
-  const w = (n        , c        ) => writeText(join(meta.specDir, n), c);
-  w('research.md', render.renderResearch(readJson(join(FD, 'research.json'))));
-  w('spec.md', render.renderSpec(readJson(join(FD, exists(join(FD, 'spec-final.json')) ? 'spec-final.json' : 'spec.json'))));
+function renderAll(ctx     , FD        , meta             , finalPlan        , assignment                        ) {
+  const doc = docs(ctx, FD, meta);
+  writeText(join(meta.specDir, 'research.md'), render.renderResearch(readJson(join(FD, 'research.json'))));
+  doc.spec();
   const synth = exists(join(FD, 'challenge-synthesis.json')) ? readJson(join(FD, 'challenge-synthesis.json')) : {};
   const planSynth = readJson(join(FD, 'plan-synthesis.json'));
-  w('plan.md', render.renderPlan(readJson(finalPlan).plan, { conflicts: planSynth.conflicts, accepted: synth.accepted, rejected: synth.rejected }));
-  if (exists(join(FD, 'tasks.json'))) w('tasks.md', render.renderTasks(readJson(join(FD, 'tasks.json')), assignment));
+  doc.plan(readJson(finalPlan).plan, { conflicts: planSynth.conflicts, accepted: synth.accepted, rejected: synth.rejected });
+  if (exists(join(FD, 'tasks.json'))) doc.tasks(assignment);
   renderDecisionsMd(FD, meta);
 }
 

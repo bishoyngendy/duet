@@ -67,8 +67,26 @@ const Finding = obj({
   required_change: str(),
 });
 
+const ExtraSections = arr(obj({ heading: str(), body: str('Markdown') }), 'Sections the template asks for that no other field covers');
+
 const PlanSchema = obj({
   summary: str(),
+  technical_context: obj({
+    language: str('Language/version, or "NEEDS CLARIFICATION: …"'),
+    dependencies: str('Primary dependencies'),
+    storage: str('Storage, or "N/A"'),
+    testing: str('Test frameworks/commands'),
+    platform: str('Target platform'),
+    project_type: str('library / cli / web-service / mobile-app / …'),
+    performance_goals: str('Performance goals, or "N/A"'),
+    constraints: str('Constraints, or "N/A"'),
+    scale: str('Scale/scope'),
+  }),
+  constitution_check: arr(
+    obj({ principle: str(), status: enm(['pass', 'violation', 'justified']), note: str('Evidence; for "justified", why it is needed and the simpler alternative rejected') }),
+    'One entry per constitution principle the plan touches',
+  ),
+  project_structure: str('The real source tree this feature touches (text tree), or "unchanged"'),
   architecture: str('Prose description of the approach and how it fits the existing system'),
   components: arr(obj({ name: str(), responsibility: str(), files: strs() })),
   data_model: str('Data/state changes, or "none"'),
@@ -77,7 +95,10 @@ const PlanSchema = obj({
   testing_strategy: str(),
   risks: arr(obj({ risk: str(), mitigation: str() })),
   rollout: str('Migration/rollout/feature-flag notes, or "none"'),
+  contracts: arr(obj({ path: str('File name under contracts/, e.g. "api.md" or "events.schema.json"'), content: str() }), 'Interface/API contracts, if the feature has any'),
+  quickstart: str('How to exercise and validate the feature end to end (markdown), or "none"'),
   open_questions: strs(),
+  extra_sections: ExtraSections,
 });
 
 const Conflict = obj({
@@ -155,13 +176,26 @@ export const SCHEMAS: Record<string, Schema> = {
   Spec: obj({
     title: str(),
     summary: str(),
-    user_stories: arr(obj({ id: str(), as_a: str(), i_want: str(), so_that: str() })),
-    functional_requirements: arr(obj({ id: str('FR-001'), text: str() })),
+    user_stories: arr(
+      obj({
+        id: str('"US1", "US2", … in priority order'),
+        title: str(),
+        priority: enm(['P1', 'P2', 'P3', 'P4', 'P5'], 'P1 = the MVP'),
+        story: str('The user journey in plain language'),
+        why_priority: str(),
+        independent_test: str('How this story alone can be tested and delivers value'),
+      }),
+    ),
+    functional_requirements: arr(obj({ id: str('FR-001'), text: str('"System MUST …"; mark unknowns "[NEEDS CLARIFICATION: …]"') })),
     non_functional_requirements: arr(obj({ id: str('NFR-001'), text: str() })),
-    acceptance_criteria: arr(obj({ id: str('AC-001'), given: str(), when: str(), then: str() })),
+    key_entities: arr(obj({ name: str(), description: str('What it represents and its key attributes, no implementation') })),
+    acceptance_criteria: arr(obj({ id: str('AC-001'), story: nstr('User story id it belongs to, or null'), given: str(), when: str(), then: str() })),
+    success_criteria: arr(obj({ id: str('SC-001'), text: str('Measurable, technology-agnostic outcome') })),
     edge_cases: strs(),
     out_of_scope: strs(),
     assumptions: strs(),
+    needs_clarification: strs('Open questions the spec could not settle (empty once clarified)'),
+    extra_sections: ExtraSections,
   }),
 
   Plan: PlanSchema,
@@ -199,6 +233,8 @@ export const SCHEMAS: Record<string, Schema> = {
       obj({
         id: str('"T001", …'),
         title: str(),
+        phase: enm(['setup', 'foundational', 'story', 'polish'], "Spec Kit's task phases"),
+        story: nstr('User story id (e.g. "US1") for phase "story", else null'),
         description: str('Self-contained brief: what to build, where, and how it fits the plan'),
         depends_on: strs(),
         files_in_scope: strs('Glob patterns of files this task may touch'),
@@ -252,6 +288,9 @@ export type Feature = { id: string; slug: string; title: string; summary: string
 export type Task = {
   id: string;
   title: string;
+  /** Absent in runs made before Spec Kit phases. */
+  phase?: 'setup' | 'foundational' | 'story' | 'polish';
+  story?: string | null;
   description: string;
   depends_on: string[];
   files_in_scope: string[];

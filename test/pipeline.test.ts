@@ -25,8 +25,8 @@ const question = {
 };
 
 const tasks = [
-  { id: 'T001', title: 'Core', description: 'd', depends_on: [], files_in_scope: ['src/**'], acceptance: ['a'], test_command: null },
-  { id: 'T002', title: 'Wire up', description: 'd', depends_on: ['T001'], files_in_scope: ['src/**'], acceptance: ['a'], test_command: 'true' },
+  { id: 'T001', title: 'Core', phase: 'foundational', story: null, description: 'd', depends_on: [], files_in_scope: ['src/**'], acceptance: ['a'], test_command: null },
+  { id: 'T002', title: 'Wire up', phase: 'foundational', story: null, description: 'd', depends_on: ['T001'], files_in_scope: ['src/**'], acceptance: ['a'], test_command: 'true' },
 ];
 
 const hostScript: HostScript = (step, base) => {
@@ -283,9 +283,9 @@ test('polish can be disabled', async () => {
 });
 
 const parallelTasks = [
-  { id: 'T001', title: 'Left', description: 'd', depends_on: [], files_in_scope: ['src/a/**'], acceptance: ['a'], test_command: null },
-  { id: 'T002', title: 'Right', description: 'd', depends_on: [], files_in_scope: ['src/b/**'], acceptance: ['a'], test_command: null },
-  { id: 'T003', title: 'Join', description: 'd', depends_on: ['T001', 'T002'], files_in_scope: ['src/**'], acceptance: ['a'], test_command: null },
+  { id: 'T001', title: 'Left', phase: 'foundational', story: null, description: 'd', depends_on: [], files_in_scope: ['src/a/**'], acceptance: ['a'], test_command: null },
+  { id: 'T002', title: 'Right', phase: 'foundational', story: null, description: 'd', depends_on: [], files_in_scope: ['src/b/**'], acceptance: ['a'], test_command: null },
+  { id: 'T003', title: 'Join', phase: 'foundational', story: null, description: 'd', depends_on: ['T001', 'T002'], files_in_scope: ['src/**'], acceptance: ['a'], test_command: null },
 ];
 const parallelHost: HostScript = (step, base) => (step.host!.schema === 'Tasks' ? { tasks: parallelTasks } : hostScript(step, base));
 
@@ -369,4 +369,21 @@ test('--until pauses after a phase and a later run continues', async () => {
   assert.match(ctx.state.message, /Reached the end of plan\. Next: F1: break plan into tasks/);
   await drive(ctx, hostScript, withConflict(() => 'suggested'));
   assert.equal(ctx.state.status, 'done');
+});
+
+test("a finished feature's specs/ dir is in Spec Kit's format, with every task ticked", async () => {
+  const repo = gitRepo();
+  const ctx = makeRun(repo, { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  const visited = await drive(ctx, hostScript, withConflict(() => 'suggested'));
+  const FD = join(ctx.dir, 'features', 'F1');
+  const meta = readJson(join(FD, 'feature.json'));
+  assert.match(readFileSync(join(FD, 'templates', 'spec-template.md'), 'utf8'), /# Feature Specification/, 'bundled template resolved');
+  const tasksMd = readFileSync(join(meta.specDir, 'tasks.md'), 'utf8');
+  assert.match(tasksMd, /^- \[X\] T001 Core/m);
+  assert.match(tasksMd, /^- \[X\] T002 Wire up/m);
+  assert.match(readFileSync(join(meta.specDir, 'spec.md'), 'utf8'), /^# Feature Specification: /);
+  assert.match(readFileSync(join(meta.specDir, 'plan.md'), 'utf8'), /^# Implementation Plan: /);
+  assert.equal(git(meta.worktree, 'status', '--porcelain'), '', 'ticks are committed');
+  assert.match(git(meta.worktree, 'show', '--stat', '--format=', 'HEAD~1'), /tasks\.md/, 'the last task commit carries its tick');
+  assert.ok(visited.length);
 });
