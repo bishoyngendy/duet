@@ -1,19 +1,22 @@
 // The workflow, expressed as a generator of steps. Every step's completion is derived from artifacts
 // on disk, so the "current position" is always recomputed: resuming after a crash is just running again.
 
-import { existsSync, readdirSync, renameSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { other, runAgent, type Agents } from './agents/index.ts';
 import type { Role } from './agents/types.ts';
 import { bounceConflicts } from './conflict.ts';
 import { runChecks, type CheckResult } from './checks.ts';
 import type { Config } from './config.ts';
 import { addWorktree, commitAll, diff, git, head, removeWorktree, restore, snapshot, worktreePath } from './git.ts';
+import { liveCall } from './live.ts';
 import { hostInstructions, workerPrompt } from './prompt.ts';
 import * as render from './render.ts';
 import { SCHEMAS, type AgentName, type Answer, type Feature, type MergedQ, type Task } from './schemas.ts';
 import { logEvent, type RunState } from './state.ts';
-import { appendLine, exec, exists, fmtMs, readJson, readText, sh, tail, topoSort, writeJson, writeText } from './util.ts';
+import { appendLine, exec, exists, fmtMs, readJson, readText, sh, sha, slugify, tail, topoSort, writeJson, writeText } from './util.ts';
+import { highestReserved, registerFeature } from './features.ts';
+import { detect, nextFeatureNumber, resolveTemplate, writeFeatureDir } from './speckit.ts';
 import { planWaves } from './waves.ts';
 
 export type Ctx = {
@@ -42,10 +45,17 @@ export type Gate = {
   after?: (answers: Answer[]) => void | Promise<void>;
 };
 
+/** Spec Kit's phases, in pipeline order; `duetto <phase>` runs a feature up to the end of one. */
+export const PHASES = ['scan', 'decompose', 'specify', 'clarify', 'plan', 'tasks', 'analyze', 'implement', 'converge'] as const;
+export type Phase = (typeof PHASES)[number];
+
 export type Step = {
   id: string;
   title: string;
   kind: 'worker' | 'deterministic' | 'host' | 'user';
+  /** Set by pipeline() from the step id (see phaseOf). */
+  phase?: Phase;
+  feature?: string;
   done: () => boolean;
   run?: () => Promise<void>;
   host?: HostTask;
@@ -63,6 +73,8 @@ async function callAgent(
   o: { stepId: string; role: Role; prompt: string; cwd: string; writable: boolean; schema: string },
 ): Promise<any> {
   ctx.print(`    ${agent} ▸ ${o.role} (${o.stepId})…`);
+  const live = liveCall(ctx.dir, agent, { label: `${label(o.stepId)}.${agent}`, step: o.stepId, role: o.role });
+  const started = Date.now();
   const res = await runAgent(ctx.agents[agent], {
     role: o.role,
     prompt: o.prompt,
@@ -72,7 +84,12 @@ async function callAgent(
     rawDir: join(ctx.dir, 'raw'),
     label: `${label(o.stepId)}.${agent}`,
     timeoutMs: ctx.config.timeout_minutes * 60_000,
+    onActivity: live.onActivity,
+  }).catch((err) => {
+    live.end({ ok: false, ms: Date.now() - started, error: (err as Error).message });
+    throw err;
   });
+  live.end({ ok: true, ms: res.durationMs, costUsd: res.costUsd });
   logEvent(ctx.dir, { type: 'agent', step: o.stepId, agent, role: o.role, duration_ms: res.durationMs, cost_usd: res.costUsd, attempts: res.attempts });
   ctx.print(`    ${agent} ✓ ${o.role} (${o.stepId}, ${fmtMs(res.durationMs)}${res.costUsd ? `, $${res.costUsd.toFixed(2)}` : ''})`);
   return res.output;
@@ -133,7 +150,32 @@ const choiceOf = (path: string, qid: string): string => (readJson(path).answers 
 
 // ───────────────────────────── pipeline ─────────────────────────────
 
+/** The phase a step belongs to, from its id. One table, so a new step can't silently fall outside every phase. */
+export function phaseOf(id: string): { phase: Phase; feature?: string } {
+  if (id === 'scan') return { phase: 'scan' };
+  if (id.startsWith('decompose')) return { phase: 'decompose' };
+  const [feature, rest = ''] = [id.slice(0, id.indexOf('/')), id.slice(id.indexOf('/') + 1)];
+  const table: [RegExp, Phase][] = [
+    [/^spec-reconcile/, 'plan'],
+    [/^(plan|tasks)-reconcile/, 'tasks'],
+    [/^(setup|templates|research|specify$)/, 'specify'],
+    [/^(clarify-|specify-revise)/, 'clarify'],
+    [/^(plan|challenge)/, 'plan'],
+    [/^(tasks|spec-commit|waves)$/, 'tasks'],
+    [/^analyze/, 'analyze'],
+    [/^(T\d+|W\d+\/)/, 'implement'],
+    [/^(converge-|FIX\d+|report$)/, 'converge'],
+  ];
+  const hit = /^F\d+$/.test(feature) ? table.find(([re]) => re.test(rest)) : undefined;
+  if (!hit) throw new Error(`No phase for step ${id}`);
+  return { phase: hit[1], feature };
+}
+
 export function* pipeline(ctx: Ctx): Generator<Step> {
+  for (const step of steps(ctx)) yield Object.assign(step, phaseOf(step.id));
+}
+
+function* steps(ctx: Ctx): Generator<Step> {
   const D = ctx.dir;
   const request = join(D, 'request.md');
 
@@ -147,7 +189,8 @@ export function* pipeline(ctx: Ctx): Generator<Step> {
     prompt: () => workerPrompt('scanner', ctx.repo, { request: readText(request) }),
   });
 
-  yield* decompose(ctx);
+  if (ctx.state.mode === 'single') yield singleFeature(ctx);
+  else yield* decompose(ctx);
 
   const features = topoSort(readJson<{ features: Feature[] }>(join(D, 'decomposition.json')).features);
   let prev: Feature | null = null;
@@ -155,6 +198,30 @@ export function* pipeline(ctx: Ctx): Generator<Step> {
     yield* feature(ctx, f, prev);
     prev = f;
   }
+}
+
+/** `# Feature Specification: Title` → `Title`. */
+export const specTitle = (md: string) => md.match(/^#\s+(?:Feature Specification:\s*)?(.+)$/m)?.[1].trim() ?? null;
+
+/** `duetto specify`: the request is one feature, so decomposition is just bookkeeping. */
+function singleFeature(ctx: Ctx): Step {
+  const out = join(ctx.dir, 'decomposition.json');
+  return {
+    id: 'decompose',
+    title: 'Single feature',
+    kind: 'deterministic',
+    done: () => exists(out),
+    run: async () => {
+      const request = readText(join(ctx.dir, 'request.md')).trim();
+      const adopted = ctx.state.adopted?.spec_dir;
+      const title = adopted ? specTitle(readText(join(ctx.dir, 'adopted-spec.md'))) ?? request : request.split('\n')[0].slice(0, 80);
+      const slug = adopted ? basename(adopted).replace(/^\d+-/, '') : slugify(request, 40);
+      const rationale = adopted ? `Adopted ${adopted} (written with Spec Kit).` : 'Single feature (duetto specify).';
+      const d = { rationale, features: [{ id: 'F1', slug, title, summary: request, scope: request, depends_on: [] }] };
+      writeJson(out, d);
+      writeText(join(ctx.dir, 'decomposition.md'), render.renderDecomposition(d));
+    },
+  };
 }
 
 function* decompose(ctx: Ctx): Generator<Step> {
@@ -210,6 +277,43 @@ function* decompose(ctx: Ctx): Generator<Step> {
 
 type FeatureMeta = { id: string; title: string; slug: string; number: string; branch: string; worktree: string; base: string; specDir: string };
 
+/** Renders a feature's Spec Kit documents into its specs/NNN-slug/ dir. */
+/** Checkbox state is progress, not an edit. */
+const normalizeMd = (md: string) => md.replace(/^(\s*- )\[[xX]\]/gm, '$1[ ]').trim();
+const renderedPath = (FD: string) => join(FD, 'rendered.json');
+
+/** True when the user edited a rendered document (spec.md, plan.md, tasks.md) since duetto last wrote it. */
+function drifted(FD: string, meta: FeatureMeta, doc: string): boolean {
+  const file = join(meta.specDir, doc);
+  const recorded = exists(renderedPath(FD)) ? readJson(renderedPath(FD))[doc] : undefined;
+  return Boolean(recorded && exists(file) && sha(normalizeMd(readText(file))) !== recorded);
+}
+
+function docs(ctx: Ctx, FD: string, meta: FeatureMeta) {
+  const w = (n: string, c: string) => {
+    writeText(join(meta.specDir, n), c);
+    if (['spec.md', 'plan.md', 'tasks.md'].includes(n)) writeJson(renderedPath(FD), { ...(exists(renderedPath(FD)) ? readJson(renderedPath(FD)) : {}), [n]: sha(normalizeMd(c)) });
+  };
+  const finalSpec = join(FD, 'spec-final.json');
+  const specFile = () => (exists(finalSpec) ? finalSpec : join(FD, 'spec.json'));
+  const docMeta = () => ({ branch: meta.branch, request: readText(join(ctx.dir, 'request.md')), date: ctx.state.created_at.slice(0, 10) });
+  return {
+    spec: (d = readJson(specFile())) => w('spec.md', render.renderSpec(d, { ...docMeta(), status: exists(finalSpec) ? 'Clarified' : 'Draft' })),
+    plan: (plan: any, extra?: Parameters<typeof render.renderPlan>[1]) => {
+      const title = readJson(specFile()).title;
+      w('plan.md', render.renderPlan(plan, extra, { ...docMeta(), title }));
+      for (const [name, content] of Object.entries(render.planFiles(plan, title))) w(name, content);
+    },
+    tasks: (assignments: Record<string, string>, alsoDone: string[] = []) => {
+      const tasksDir = join(FD, 'tasks');
+      const done = new Set([...(existsSync(tasksDir) ? readdirSync(tasksDir).filter((t) => exists(join(tasksDir, t, 'commit.json'))) : []), ...alsoDone]);
+      const waves = exists(join(FD, 'waves.json')) ? readJson(join(FD, 'waves.json')).waves : undefined;
+      const specDir = meta.specDir.startsWith(meta.worktree + '/') ? meta.specDir.slice(meta.worktree.length + 1) : meta.specDir;
+      w('tasks.md', render.renderTasks(readJson(join(FD, 'tasks.json')), { assignments, spec: readJson(specFile()), waves, done, specDir }));
+    },
+  };
+}
+
 function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
   const FD = join(ctx.dir, 'features', f.id);
   const p = (name: string) => join(FD, name);
@@ -217,22 +321,46 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
   const quick = depth === 'quick';
 
   // ── setup: stacked worktree/branch, spec number, dependency install
-  yield det(`${f.id}/setup`, `${f.id}: create worktree`, p('feature.json'), async () => {
+  const inplace = ctx.config.workspace === 'inplace' && ctx.state.mode === 'single';
+  yield det(`${f.id}/setup`, inplace ? `${f.id}: create feature branch` : `${f.id}: create worktree`, p('feature.json'), async () => {
     const base = prev ? (readJson<FeatureMeta>(join(ctx.dir, 'features', prev.id, 'feature.json')).branch) : ctx.state.base_commit;
     const baseSha = await git(ctx.repo, 'rev-parse', base);
-    const wt = worktreePath(ctx.repo, ctx.config.worktrees_dir, ctx.state.id, f.id);
-    const branch = `duet/${ctx.state.id}/${f.id}-${f.slug}`;
-    if (!existsSync(wt)) await addWorktree(ctx.repo, wt, branch, baseSha);
-    const specsRoot = join(wt, 'specs');
-    const used = existsSync(specsRoot) ? readdirSync(specsRoot).map((n) => Number(n.match(/^(\d{3})-/)?.[1] ?? 0)) : [];
-    const number = String(Math.max(0, ...used) + 1).padStart(3, '0');
+    const adopted = ctx.state.adopted?.spec_dir;
+    const numberIn = (specsRoot: string) =>
+      adopted ? (basename(adopted).match(/^(\d+)-/)?.[1] ?? '000') : String(Math.max(Number(nextFeatureNumber(specsRoot)), highestReserved(ctx.repo) + 1)).padStart(3, '0');
+    let wt: string, branch: string, number: string;
+    if (inplace) {
+      // Spec Kit's own flow: a NNN-slug branch in the user's checkout (like its git extension).
+      const dirty = (await git(ctx.repo, 'status', '--porcelain')).split('\n').filter((l) => l && !/\.duetto\/|\.gitignore$|\.specify\/feature\.json$/.test(l));
+      if (dirty.length) throw new Error(`workspace "inplace" works in your checkout and needs it clean; commit or stash first:\n${dirty.slice(0, 8).join('\n')}`);
+      wt = ctx.repo;
+      number = numberIn(join(wt, 'specs'));
+      branch = `${number}-${f.slug}`;
+      const exists_ = (await exec('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: ctx.repo })).code === 0;
+      await git(ctx.repo, 'checkout', ...(exists_ ? [branch] : ['-b', branch, baseSha]));
+    } else {
+      wt = worktreePath(ctx.repo, ctx.config.worktrees_dir, ctx.state.id, f.id);
+      branch = `duetto/${ctx.state.id}/${f.id}-${f.slug}`;
+      if (!existsSync(wt)) await addWorktree(ctx.repo, wt, branch, baseSha);
+      number = numberIn(join(wt, 'specs'));
+    }
     await runSetup(ctx, wt);
-    const meta: FeatureMeta = { id: f.id, title: f.title, slug: f.slug, number, branch, worktree: wt, base: baseSha, specDir: join(specsRoot, `${number}-${f.slug}`) };
+    const specDir = adopted ?? `specs/${number}-${f.slug}`;
+    const meta: FeatureMeta = { id: f.id, title: f.title, slug: f.slug, number, branch, worktree: wt, base: baseSha, specDir: join(wt, specDir) };
+    registerFeature(ctx.repo, { run: ctx.state.id, feature: f.id, spec_dir: specDir, branch, worktree: wt });
+    writeFeatureDir(wt, specDir); // Spec Kit's commands, run inside the worktree, find this feature
     return meta;
   });
   const meta = readJson<FeatureMeta>(p('feature.json'));
   const wt = meta.worktree;
   const md = (name: string, content: string) => writeText(join(meta.specDir, name), content);
+  const doc = docs(ctx, FD, meta);
+
+  // ── the project's Spec Kit templates (or bundled copies), as structure guides for the host
+  yield det(`${f.id}/templates`, `${f.id}: resolve Spec Kit templates`, p('templates/resolved.json'), async () => {
+    for (const name of ['spec-template', 'plan-template', 'tasks-template'] as const) writeText(p(`templates/${name}.md`), await resolveTemplate(ctx.repo, name));
+    return { speckit: detect(ctx.repo) };
+  });
   const ctxInputs = () => ({ request: readText(join(ctx.dir, 'request.md')), feature: f, codebase_scans: { claude: readJson(join(ctx.dir, 'scan.claude.json')), codex: readJson(join(ctx.dir, 'scan.codex.json')) } });
 
   // ── research: independent → rebuttal → host synthesis
@@ -270,7 +398,19 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     after: (d) => md('research.md', render.renderResearch(d)),
   });
 
-  // ── clarification rounds
+  // ── spec draft first, then clarify against it (Spec Kit's order: specify → clarify)
+  const adopted = ctx.state.adopted ? join(ctx.dir, 'adopted-spec.md') : null;
+  yield host(`${f.id}/specify`, adopted ? `${f.id}: import your Spec Kit spec` : `${f.id}: write spec`, {
+    instructions: hostInstructions(adopted ? 'specify-import' : 'specify'),
+    inputs: adopted
+      ? { spec_md: adopted, research: p('research.json'), spec_template: p('templates/spec-template.md') }
+      : { request: join(ctx.dir, 'request.md'), decomposition: join(ctx.dir, 'decomposition.json'), research: p('research.json'), spec_template: p('templates/spec-template.md') },
+    schema: 'Spec',
+    output: p('spec.json'),
+    after: (d) => doc.spec(d),
+  });
+
+  // ── clarification rounds against the draft
   const maxRounds = ctx.config.max_clarify_rounds[depth];
   const answered: { round: number; questions: MergedQ[]; answers: Answer[] }[] = [];
   for (let r = 1; r <= maxRounds; r++) {
@@ -282,11 +422,11 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
       schema: 'Questions',
       cwd: wt,
       out: (a) => p(`clarify-${r}.${a}.json`),
-      prompt: () => workerPrompt('questioner', ctx.repo, { ...ctxInputs(), research: readJson(p('research.json')), previous_answers: prior }),
+      prompt: () => workerPrompt('questioner', ctx.repo, { ...ctxInputs(), research: readJson(p('research.json')), spec_draft: readJson(p('spec.json')), previous_answers: prior }),
     });
     yield host(`${f.id}/clarify-${r}-merge`, `${f.id}: merge questions, round ${r}`, {
       instructions: hostInstructions('clarify'),
-      inputs: { questions_claude: p(`clarify-${r}.claude.json`), questions_codex: p(`clarify-${r}.codex.json`), research: p('research.json'), ...answerInputs(FD, r) },
+      inputs: { questions_claude: p(`clarify-${r}.claude.json`), questions_codex: p(`clarify-${r}.codex.json`), spec_draft: p('spec.json'), research: p('research.json'), ...answerInputs(FD, r) },
       schema: 'MergedQuestions',
       output: p(`questions-${r}.json`),
       postprocess: (d) => normalizeQuestions(d),
@@ -294,7 +434,7 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     const qs = readJson<{ questions: MergedQ[] }>(p(`questions-${r}.json`)).questions;
     if (!qs.length) break;
     yield gate(`${f.id}/clarify-${r}-answers`, `${f.id}: answer clarifying questions (round ${r})`, {
-      context: [join(meta.specDir, 'research.md')],
+      context: [join(meta.specDir, 'spec.md'), join(meta.specDir, 'research.md')],
       questions: qs,
       output: p(`answers-${r}.json`),
       after: () => renderDecisionsMd(FD, meta),
@@ -302,15 +442,22 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     answered.push({ round: r, questions: qs, answers: readJson(p(`answers-${r}.json`)).answers });
   }
 
-  // ── spec
-  yield host(`${f.id}/specify`, `${f.id}: write spec`, {
-    instructions: hostInstructions('specify'),
-    inputs: { request: join(ctx.dir, 'request.md'), decomposition: join(ctx.dir, 'decomposition.json'), research: p('research.json'), ...answerInputs(FD) },
-    schema: 'Spec',
-    output: p('spec.json'),
-    after: (d) => md('spec.md', render.renderSpec(d)),
-  });
-  const planInputs = () => ({ feature: f, spec: readJson(p('spec.json')), research: readJson(p('research.json')), decisions: allAnswers(FD) });
+
+  // ── spec revision with the user's answers. Runs made before this order existed (plan already started) skip it.
+  const specFinal = p('spec-final.json');
+  if (answered.length && (exists(specFinal) || !exists(p('plan.claude.json')))) {
+    yield host(`${f.id}/specify-revise`, `${f.id}: revise spec with your answers`, {
+      instructions: hostInstructions('specify-revise'),
+      inputs: { spec_draft: p('spec.json'), spec_template: p('templates/spec-template.md'), ...answerInputs(FD) },
+      schema: 'Spec',
+      output: specFinal,
+      after: (d) => doc.spec(d),
+    });
+  }
+  const specPath = exists(specFinal) ? specFinal : p('spec.json');
+  const planInputs = () => ({ feature: f, spec: readJson(specPath), research: readJson(p('research.json')), decisions: allAnswers(FD) });
+
+  yield* reconcile(ctx, FD, meta, { doc: 'spec.md', json: specPath, schema: 'Spec', render: (d) => doc.spec(d), downstream: [...PLAN_FILES, ...TASK_FILES] });
 
   // ── plan: independent → rebuttal → host synthesis (+ escalated decisions)
   yield both(ctx, {
@@ -330,7 +477,7 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
       schema: 'Rebuttal',
       cwd: wt,
       out: (a) => p(`plan-rebuttal.${a}.json`),
-      prompt: (a) => workerPrompt('rebutter', ctx.repo, { spec: readJson(p('spec.json')), your_output: readJson(p(`plan.${a}.json`)), their_output: readJson(p(`plan.${other(a)}.json`)) }),
+      prompt: (a) => workerPrompt('rebutter', ctx.repo, { spec: readJson(specPath), your_output: readJson(p(`plan.${a}.json`)), their_output: readJson(p(`plan.${other(a)}.json`)) }),
     });
   }
   yield* decided(ctx, FD, meta, {
@@ -338,11 +485,12 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     title: `${f.id}: synthesize plan`,
     instructions: hostInstructions('plan'),
     inputs: pick({
-      spec: p('spec.json'),
+      spec: specPath,
       plan_claude: p('plan.claude.json'),
       plan_codex: p('plan.codex.json'),
       rebuttal_claude: quick ? null : p('plan-rebuttal.claude.json'),
       rebuttal_codex: quick ? null : p('plan-rebuttal.codex.json'),
+      plan_template: p('templates/plan-template.md'),
       ...answerInputs(FD),
     }),
     schema: 'PlanSynthesis',
@@ -361,13 +509,13 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
       schema: 'Challenge',
       cwd: wt,
       out: (a) => p(`challenge.${a}.json`),
-      prompt: () => workerPrompt('challenger', ctx.repo, { spec: readJson(p('spec.json')), plan: readJson(p('plan.json')).plan, decisions: allAnswers(FD) }),
+      prompt: () => workerPrompt('challenger', ctx.repo, { spec: readJson(specPath), plan: readJson(p('plan.json')).plan, decisions: allAnswers(FD) }),
     });
     yield* decided(ctx, FD, meta, {
       id: `${f.id}/challenge-synthesis`,
       title: `${f.id}: fold in challenge findings`,
       instructions: hostInstructions('challenge'),
-      inputs: { spec: p('spec.json'), plan: p('plan.json'), challenge_claude: p('challenge.claude.json'), challenge_codex: p('challenge.codex.json') },
+      inputs: { spec: specPath, plan: p('plan.json'), challenge_claude: p('challenge.claude.json'), challenge_codex: p('challenge.codex.json') },
       schema: 'ChallengeSynthesis',
       synth: p('challenge-synthesis.json'),
       final: p('plan-final.json'),
@@ -376,37 +524,62 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     finalPlan = p('plan-final.json');
   }
   const plan = () => readJson(finalPlan).plan;
+  yield* reconcile(ctx, FD, meta, { doc: 'plan.md', json: finalPlan, schema: 'PlanFinal', render: (d) => doc.plan(d.plan), downstream: TASK_FILES });
 
   // ── tasks DAG
   yield host(`${f.id}/tasks`, `${f.id}: break plan into tasks`, {
     instructions: hostInstructions('tasks'),
-    inputs: { spec: p('spec.json'), plan: finalPlan },
+    inputs: { spec: specPath, plan: finalPlan, tasks_template: p('templates/tasks-template.md') },
     schema: 'Tasks',
     output: p('tasks.json'),
-    postprocess: (d) => {
-      if (!d.tasks.length) throw new Error('At least one task is required');
-      if (new Set(d.tasks.map((t: Task) => t.id)).size !== d.tasks.length) throw new Error('Duplicate task ids');
-      topoSort(d.tasks);
-      return d;
-    },
+    postprocess: validateTasks,
   });
+  const assign = (ts: Task[]) => Object.fromEntries(topoSort(ts).map((t, i) => [t.id, i % 2 === 0 ? ctx.config.first_implementer : other(ctx.config.first_implementer)])) as Record<string, AgentName>;
+  yield* reconcile(ctx, FD, meta, { doc: 'tasks.md', json: p('tasks.json'), schema: 'Tasks', postprocess: validateTasks, render: (d) => doc.tasks(assign(d.tasks)), downstream: ['waves.json', 'spec-commit.json', ...ANALYSIS_FILES] });
   const tasks = topoSort(readJson<{ tasks: Task[] }>(p('tasks.json')).tasks);
-  const assignment: Record<string, AgentName> = {};
-  tasks.forEach((t, i) => (assignment[t.id] = i % 2 === 0 ? ctx.config.first_implementer : other(ctx.config.first_implementer)));
+  const assignment = assign(tasks);
 
-  yield det(`${f.id}/spec-commit`, `${f.id}: commit spec artifacts`, p('spec-commit.json'), async () => {
-    renderAll(FD, meta, finalPlan, assignment);
-    const sha = await commitAll(wt, `docs(${meta.number}): spec, plan and tasks for ${f.title}\n\nGenerated by duet run ${ctx.state.id}.`);
-    return { sha };
-  });
-
-  // ── implement: alternate implementer/reviewer per task; independent tasks run concurrently in waves.
+  // ── waves: independent tasks run concurrently (scheduled before the spec commit so tasks.md can mark [P]).
   // Already-started tasks (a run resumed after upgrading) stay solo in the feature worktree they began in.
   yield det(`${f.id}/waves`, `${f.id}: schedule tasks`, p('waves.json'), async () => ({
     waves: planWaves(tasks, ctx.config.parallel_tasks, (t) => exists(join(FD, 'tasks', t.id, 'base.json'))).map((w) => w.map((t) => t.id)),
   }));
+  yield det(`${f.id}/spec-commit`, `${f.id}: commit spec artifacts`, p('spec-commit.json'), async () => {
+    renderAll(ctx, FD, meta, finalPlan, assignment);
+    const sha = await commitAll(wt, `docs(${meta.number}): spec, plan and tasks for ${f.title}\n\nGenerated by duetto run ${ctx.state.id}.`);
+    return { sha };
+  });
+
+  // ── analyze (Spec Kit's /analyze, both models): on request (`duetto analyze`), or at deep depth for runs that
+  // hadn't started implementing when this phase was introduced
+  const autoAnalyze = depth === 'deep' && (exists(p('analysis.json')) || !existsSync(join(FD, 'tasks')));
+  if (autoAnalyze || exists(p('analyze.requested'))) {
+    const docsInput = () => ({ spec: readJson(specPath), plan: plan(), tasks: readJson(p('tasks.json')).tasks });
+    yield both(ctx, {
+      id: `${f.id}/analyze`,
+      title: `${f.id}: analyze spec, plan and tasks (Claude ∥ Codex)`,
+      role: 'analyzer',
+      schema: 'Analysis',
+      cwd: wt,
+      out: (a) => p(`analysis.${a}.json`),
+      prompt: () => workerPrompt('analyzer', ctx.repo, docsInput()),
+    });
+    yield host(`${f.id}/analyze-synthesis`, `${f.id}: merge the analyses`, {
+      instructions: hostInstructions('analyze'),
+      inputs: { analysis_claude: p('analysis.claude.json'), analysis_codex: p('analysis.codex.json'), spec: specPath, plan: finalPlan, tasks: p('tasks.json') },
+      schema: 'AnalysisSynthesis',
+      output: p('analysis.json'),
+      after: (d) => {
+        md('analysis.md', render.renderAnalysis(d));
+        const serious = d.findings.filter((x: any) => x.severity === 'critical' || x.severity === 'high');
+        if (serious.length) ctx.print(`    analysis: ${serious.length} critical/high finding(s) — see analysis.md; implementers will be told about them`);
+      },
+    });
+  }
+
+  // ── implement: alternate implementer/reviewer per task
   const waves = readJson<{ waves: string[][] }>(p('waves.json')).waves.map((ids) => ids.map((id) => tasks.find((t) => t.id === id)!));
-  const shared = { ctx, FD, meta, spec: () => readJson(p('spec.json')), plan, tasks };
+  const shared = { ctx, FD, meta, spec: () => readJson(specPath), plan, tasks, assignment };
   for (const [i, wave] of waves.entries()) {
     if (wave.length === 1) yield* taskLoop(shared, wave[0], assignment[wave[0].id]);
     else yield* parallelWave(shared, `W${i + 1}`, wave, assignment);
@@ -485,16 +658,16 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     });
     const lastConv = lastNumbered(FD, 'converge-', '.json', (n) => !n.includes('decision'));
     const lastChecks = lastNumbered(FD, 'final-checks-', '.json');
-    renderAll(FD, meta, finalPlan, assignment);
+    renderAll(ctx, FD, meta, finalPlan, assignment);
     md('report.md', render.renderReport({ feature: f, tasks: rows, converge: lastConv ? readJson(lastConv) : { status: '?', summary: '', acceptance: [], findings: [] }, checks: lastChecks ? readJson(lastChecks) : null }));
-    const sha = await commitAll(wt, `docs(${meta.number}): duet report for ${f.title}`);
+    const sha = await commitAll(wt, `docs(${meta.number}): duetto report for ${f.title}`);
     return { sha, branch: meta.branch, worktree: wt };
   });
 }
 
 // ───────────────────────────── task loop ─────────────────────────────
 
-type Shared = { ctx: Ctx; FD: string; meta: FeatureMeta; spec: () => any; plan: () => any; tasks: Task[] };
+type Shared = { ctx: Ctx; FD: string; meta: FeatureMeta; spec: () => any; plan: () => any; tasks: Task[]; assignment: Record<string, AgentName> };
 
 function* taskLoop(s: Shared, t: Task, impl: AgentName, wt = s.meta.worktree): Generator<Step> {
   const { ctx, meta } = s;
@@ -543,6 +716,7 @@ function* taskLoop(s: Shared, t: Task, impl: AgentName, wt = s.meta.worktree): G
                 : null,
               failing_checks: prevChecks && !prevChecks.passed ? summarizeChecks(prevChecks) : null,
               user_guidance: guidance.length ? guidance : null,
+              analysis_findings: seriousAnalysis(s.FD),
             },
             `You are ${impl}. Round ${r}. ${rev} will review your work.`,
           ),
@@ -644,9 +818,11 @@ function* taskLoop(s: Shared, t: Task, impl: AgentName, wt = s.meta.worktree): G
 
   const rounds = countRounds(TD);
   yield det(`${id}/commit`, `${id}: commit`, p('commit.json'), async () => {
+    // Tick the task in tasks.md in the same commit (parallel-wave tasks are ticked when merged).
+    if (wt === meta.worktree && s.tasks.some((x) => x.id === t.id)) docs(ctx, s.FD, meta).tasks(s.assignment, [t.id]);
     const sha = await commitAll(
       wt,
-      `feat(${meta.number}/${t.id}): ${t.title}\n\nImplemented-by: ${impl}\nReviewed-by: ${rev}\nReview-rounds: ${rounds}${accepted ? '\nAccepted-with-open-findings: yes' : ''}\nDuet-run: ${ctx.state.id}`,
+      `feat(${meta.number}/${t.id}): ${t.title}\n\nImplemented-by: ${impl}\nReviewed-by: ${rev}\nReview-rounds: ${rounds}${accepted ? '\nAccepted-with-open-findings: yes' : ''}\nDuetto-run: ${ctx.state.id}`,
     );
     return { sha, implementer: impl, reviewer: rev, rounds, accepted_with_issues: accepted };
   });
@@ -665,7 +841,7 @@ function* parallelWave(s: Shared, wid: string, wave: Task[], assignment: Record<
   const id = `${meta.id}/${wid}`;
   const names = wave.map((t) => t.id).join(' ∥ ');
   const taskWt = (t: Task) => worktreePath(ctx.repo, ctx.config.worktrees_dir, ctx.state.id, `${meta.id}-${t.id}`);
-  const taskBranch = (t: Task) => `duet/${ctx.state.id}/${meta.id}-${t.id}`;
+  const taskBranch = (t: Task) => `duetto/${ctx.state.id}/${meta.id}-${t.id}`;
 
   yield det(`${id}/setup`, `${id}: worktrees for ${names}`, join(WD, 'setup.json'), async () => {
     const base = await head(meta.worktree);
@@ -716,6 +892,7 @@ function* parallelWave(s: Shared, wid: string, wave: Task[], assignment: Record<
       if (merged[t.id].status === 'conflict') ctx.print(`    ${t.id} conflicts with the merged work — it will be redone on top of it`);
       else await removeWorktree(ctx.repo, taskWt(t), taskBranch(t));
     }
+    docs(ctx, s.FD, meta).tasks(s.assignment); // ticks the merged tasks; committed with the next task or the report
     return merged;
   });
   const merged = readJson(join(WD, 'merge.json'));
@@ -757,6 +934,53 @@ async function runSetup(ctx: Ctx, wt: string) {
   if (res.code !== 0) throw new Error(`Setup command failed in ${wt}:\n${tail(res.stdout + res.stderr, 2000)}`);
 }
 
+// ───────────────────────────── hand edits ─────────────────────────────
+
+const ANALYSIS_FILES = ['analysis.claude.json', 'analysis.codex.json', 'analysis.json'];
+const TASK_FILES = ['tasks.json', 'waves.json', 'spec-commit.json', ...ANALYSIS_FILES];
+const PLAN_FILES = [
+  ...['plan.claude.json', 'plan.codex.json', 'plan-rebuttal.claude.json', 'plan-rebuttal.codex.json', 'plan-synthesis.json', 'plan-decisions.json', 'plan.json'],
+  ...['challenge.claude.json', 'challenge.codex.json', 'challenge-synthesis.json', 'challenge-decisions.json', 'plan-final.json'],
+];
+
+/** Moves later-phase artifacts aside so those steps run again on top of an edited document. */
+function supersede(FD: string, names: string[], why: string) {
+  const present = existsSync(FD) ? readdirSync(FD).filter((n) => names.includes(n) || /^(plan|tasks)-reconcile-\d+\.json$/.test(n)) : [];
+  if (!present.length) return;
+  const to = join(FD, 'superseded', `${Date.now()}-${why}`);
+  mkdirSync(to, { recursive: true });
+  for (const n of present) renameSync(join(FD, n), join(to, n));
+}
+
+/**
+ * Spec Kit users edit spec.md / plan.md / tasks.md between commands. Before implementation starts, an edited
+ * document is folded back into its JSON by the host, and everything planned from the old version is redone.
+ * (Once tasks are being implemented, edits are left alone; the convergence audit judges against the JSON.)
+ */
+function* reconcile(
+  ctx: Ctx,
+  FD: string,
+  meta: FeatureMeta,
+  o: { doc: 'spec.md' | 'plan.md' | 'tasks.md'; json: string; schema: string; wrap?: (d: any) => any; render: (d: any) => void; downstream: string[]; postprocess?: (d: any) => any },
+): Generator<Step> {
+  if (existsSync(join(FD, 'tasks')) || !exists(o.json) || !drifted(FD, meta, o.doc)) return;
+  const base = o.doc.replace('.md', '');
+  const n = readdirSync(FD).filter((x) => x.startsWith(`${base}-reconcile-`)).length + 1;
+  yield host(`${meta.id}/${base}-reconcile-${n}`, `${meta.id}: apply your edits to ${o.doc}`, {
+    instructions: hostInstructions('reconcile'),
+    inputs: { current_json: o.json, edited_markdown: join(meta.specDir, o.doc) },
+    schema: o.schema,
+    output: join(FD, `${base}-reconcile-${n}.json`),
+    postprocess: o.postprocess,
+    after: (d) => {
+      writeJson(o.json, o.wrap ? o.wrap(d) : d);
+      supersede(FD, o.downstream, `${base}-edited`);
+      o.render(d);
+      ctx.print(`    applied your edits to ${o.doc}; later phases will be redone`);
+    },
+  });
+}
+
 // ───────────────────────────── decision blocks ─────────────────────────────
 
 /** Host synthesis that may surface decisions: synth → (user decisions → host finalize) → final. */
@@ -779,7 +1003,7 @@ function* decided(
     },
     after: (d) => {
       if (!d.questions.length) writeJson(o.final, { plan: d.plan });
-      writeText(join(meta.specDir, 'plan.md'), render.renderPlan(d.plan, d));
+      docs(ctx, FD, meta).plan(d.plan, d);
     },
   });
   const synth = readJson(o.synth);
@@ -795,7 +1019,7 @@ function* decided(
     inputs: { synthesis: o.synth, decisions: o.answers },
     schema: 'PlanFinal',
     output: o.final,
-    after: (d) => writeText(join(meta.specDir, 'plan.md'), render.renderPlan(d.plan, synth)),
+    after: (d) => docs(ctx, FD, meta).plan(d.plan, synth),
   });
 }
 
@@ -811,6 +1035,13 @@ function aborted(id: string): Step {
       throw new Error(`Run aborted by user at ${id}`);
     },
   };
+}
+
+function validateTasks(d: { tasks: Task[] }) {
+  if (!d.tasks.length) throw new Error('At least one task is required');
+  if (new Set(d.tasks.map((t) => t.id)).size !== d.tasks.length) throw new Error('Duplicate task ids');
+  topoSort(d.tasks);
+  return d;
 }
 
 function pick(o: Record<string, string | null>): Record<string, string> {
@@ -857,14 +1088,14 @@ function renderDecisionsMd(FD: string, meta: FeatureMeta) {
   writeText(join(meta.specDir, 'decisions.md'), render.renderDecisions(entries));
 }
 
-function renderAll(FD: string, meta: FeatureMeta, finalPlan: string, assignment: Record<string, string>) {
-  const w = (n: string, c: string) => writeText(join(meta.specDir, n), c);
-  w('research.md', render.renderResearch(readJson(join(FD, 'research.json'))));
-  w('spec.md', render.renderSpec(readJson(join(FD, 'spec.json'))));
+function renderAll(ctx: Ctx, FD: string, meta: FeatureMeta, finalPlan: string, assignment: Record<string, string>) {
+  const doc = docs(ctx, FD, meta);
+  writeText(join(meta.specDir, 'research.md'), render.renderResearch(readJson(join(FD, 'research.json'))));
+  doc.spec();
   const synth = exists(join(FD, 'challenge-synthesis.json')) ? readJson(join(FD, 'challenge-synthesis.json')) : {};
   const planSynth = readJson(join(FD, 'plan-synthesis.json'));
-  w('plan.md', render.renderPlan(readJson(finalPlan).plan, { conflicts: planSynth.conflicts, accepted: synth.accepted, rejected: synth.rejected }));
-  if (exists(join(FD, 'tasks.json'))) w('tasks.md', render.renderTasks(readJson(join(FD, 'tasks.json')), assignment));
+  doc.plan(readJson(finalPlan).plan, { conflicts: planSynth.conflicts, accepted: synth.accepted, rejected: synth.rejected });
+  if (exists(join(FD, 'tasks.json'))) doc.tasks(assignment);
   renderDecisionsMd(FD, meta);
 }
 
@@ -887,6 +1118,14 @@ function summarizeChecks(c: CheckResult) {
 /** Checks as agents see them: passing commands are just a name and exit code, failing ones keep their output. */
 function checksForPrompt(c: CheckResult) {
   return { ...c, commands: c.commands.map((x) => (x.exit_code === 0 ? { cmd: x.cmd, exit_code: 0 } : x)) };
+}
+
+/** Critical/high findings of the pre-implementation analysis, if one ran: every implementer should respect them. */
+function seriousAnalysis(FD: string) {
+  const path = join(FD, 'analysis.json');
+  if (!exists(path)) return null;
+  const serious = readJson(path).findings.filter((x: any) => x.severity === 'critical' || x.severity === 'high');
+  return serious.length ? serious : null;
 }
 
 function hasPolishFindings(review: any, severities: string[]): boolean {

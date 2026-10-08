@@ -1,0 +1,2 @@
+# Host step: revise the spec with the user's answers
+The user answered clarifying questions about the draft spec. Produce the revised spec with every answer applied faithfully: update user stories, requirements, acceptance criteria, success criteria, edge cases and out-of-scope items they affect, remove assumptions the answers settled, and empty `needs_clarification` of everything answered. Keep everything the answers didn't touch exactly as it was (same ids). Do not reopen answered questions. Keep following the spec template's structure (input `spec_template`).

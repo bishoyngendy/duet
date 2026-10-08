@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { engine, util } from './impl.ts';
@@ -25,8 +25,8 @@ const question = {
 };
 
 const tasks = [
-  { id: 'T001', title: 'Core', description: 'd', depends_on: [], files_in_scope: ['src/**'], acceptance: ['a'], test_command: null },
-  { id: 'T002', title: 'Wire up', description: 'd', depends_on: ['T001'], files_in_scope: ['src/**'], acceptance: ['a'], test_command: 'true' },
+  { id: 'T001', title: 'Core', phase: 'foundational', story: null, description: 'd', depends_on: [], files_in_scope: ['src/**'], acceptance: ['a'], test_command: null },
+  { id: 'T002', title: 'Wire up', phase: 'foundational', story: null, description: 'd', depends_on: ['T001'], files_in_scope: ['src/**'], acceptance: ['a'], test_command: 'true' },
 ];
 
 const hostScript: HostScript = (step, base) => {
@@ -115,7 +115,7 @@ test('full pipeline: research → clarify → plan (escalation) → challenge �
   assert.match(log, /docs\(001\): spec, plan and tasks/);
   assert.match(log, /feat\(001\/T001\): Core/);
   assert.match(log, /feat\(001\/T002\): Wire up/);
-  assert.match(log, /docs\(001\): duet report/);
+  assert.match(log, /docs\(001\): duetto report/);
   for (const f of ['spec.md', 'plan.md', 'tasks.md', 'research.md', 'decisions.md', 'report.md']) {
     assert.ok(existsSync(join(meta.specDir, f)), `${f} exists`);
   }
@@ -283,9 +283,9 @@ test('polish can be disabled', async () => {
 });
 
 const parallelTasks = [
-  { id: 'T001', title: 'Left', description: 'd', depends_on: [], files_in_scope: ['src/a/**'], acceptance: ['a'], test_command: null },
-  { id: 'T002', title: 'Right', description: 'd', depends_on: [], files_in_scope: ['src/b/**'], acceptance: ['a'], test_command: null },
-  { id: 'T003', title: 'Join', description: 'd', depends_on: ['T001', 'T002'], files_in_scope: ['src/**'], acceptance: ['a'], test_command: null },
+  { id: 'T001', title: 'Left', phase: 'foundational', story: null, description: 'd', depends_on: [], files_in_scope: ['src/a/**'], acceptance: ['a'], test_command: null },
+  { id: 'T002', title: 'Right', phase: 'foundational', story: null, description: 'd', depends_on: [], files_in_scope: ['src/b/**'], acceptance: ['a'], test_command: null },
+  { id: 'T003', title: 'Join', phase: 'foundational', story: null, description: 'd', depends_on: ['T001', 'T002'], files_in_scope: ['src/**'], acceptance: ['a'], test_command: null },
 ];
 const parallelHost: HostScript = (step, base) => (step.host!.schema === 'Tasks' ? { tasks: parallelTasks } : hostScript(step, base));
 
@@ -336,4 +336,168 @@ test('a parallel task that conflicts on merge is redone on top of the merged wor
   assert.match(git(meta.worktree, 'log', '--format=%s'), /feat\(001\/T002-rerun\): Right/);
   assert.equal(git(meta.worktree, 'status', '--porcelain'), '', 'no cherry-pick left in progress');
   assert.match(readFileSync(join(meta.specDir, 'report.md'), 'utf8'), /T002-rerun/);
+});
+
+test('steps run in Spec Kit phase order: specify → clarify (against the draft) → plan → tasks → implement → converge', async () => {
+  const repo = gitRepo();
+  const claude = new FakeAgent('claude', implementerWrites);
+  const ctx = makeRun(repo, { claude, codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  await drive(ctx, hostScript, withConflict(() => 'suggested'));
+  const { done } = locate(ctx);
+  const order = ['scan', 'decompose', 'specify', 'clarify', 'plan', 'tasks', 'analyze', 'implement', 'converge'];
+  const ranks = done.map((s: any) => order.indexOf(s.phase));
+  assert.ok(ranks.every((r: number, i: number) => r >= 0 && (i === 0 || r >= ranks[i - 1])), done.map((s: any) => `${s.id}:${s.phase}`).join(' '));
+  assert.ok(done.some((s: any) => s.id === 'F1/specify-revise'), 'answers were folded into the spec');
+  const ids = done.map((s: any) => s.id);
+  assert.ok(ids.indexOf('F1/specify') < ids.indexOf('F1/clarify-1'));
+  const questioner = claude.calls.find((c) => c.role === 'questioner')!;
+  assert.match(questioner.prompt, /<input name="spec_draft">/);
+  const FD = join(ctx.dir, 'features', 'F1');
+  assert.ok(existsSync(join(FD, 'spec-final.json')));
+  const planPrompt = claude.calls.find((c) => c.role === 'planner')!.prompt;
+  assert.ok(planPrompt.includes(JSON.stringify(readJson(join(FD, 'spec-final.json')), null, 2)), 'the plan is made from the revised spec');
+});
+
+test('--until pauses after a phase and a later run continues', async () => {
+  const repo = gitRepo();
+  const ctx = makeRun(repo, { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  await drive(ctx, hostScript, withConflict(() => 'suggested'), 200, { phase: 'plan' });
+  assert.equal(ctx.state.status, 'paused');
+  const FD = join(ctx.dir, 'features', 'F1');
+  assert.ok(existsSync(join(FD, 'plan.json')), 'plan phase finished');
+  assert.ok(!existsSync(join(FD, 'tasks.json')), 'tasks phase not started');
+  assert.match(ctx.state.message, /Reached the end of plan\. Next: F1: break plan into tasks — run `duetto tasks` to continue\./);
+  assert.equal(await advance(ctx), 'paused', 'the target sticks: a plain run (e.g. after a host submit) stops there again');
+  await drive(ctx, hostScript, withConflict(() => 'suggested'), 200, { phase: 'converge' });
+  assert.equal(ctx.state.status, 'done');
+});
+
+test("a finished feature's specs/ dir is in Spec Kit's format, with every task ticked", async () => {
+  const repo = gitRepo();
+  const ctx = makeRun(repo, { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  const visited = await drive(ctx, hostScript, withConflict(() => 'suggested'));
+  const FD = join(ctx.dir, 'features', 'F1');
+  const meta = readJson(join(FD, 'feature.json'));
+  assert.match(readFileSync(join(FD, 'templates', 'spec-template.md'), 'utf8'), /# Feature Specification/, 'bundled template resolved');
+  const tasksMd = readFileSync(join(meta.specDir, 'tasks.md'), 'utf8');
+  assert.match(tasksMd, /^- \[X\] T001 Core/m);
+  assert.match(tasksMd, /^- \[X\] T002 Wire up/m);
+  assert.match(readFileSync(join(meta.specDir, 'spec.md'), 'utf8'), /^# Feature Specification: /);
+  assert.match(readFileSync(join(meta.specDir, 'plan.md'), 'utf8'), /^# Implementation Plan: /);
+  assert.equal(git(meta.worktree, 'status', '--porcelain'), '', 'ticks are committed');
+  assert.match(git(meta.worktree, 'show', '--stat', '--format=', 'HEAD~1'), /tasks\.md/, 'the last task commit carries its tick');
+  assert.ok(visited.length);
+});
+
+test('analyze: both models audit spec/plan/tasks, the host merges a Spec Kit-style report, implementers see serious findings', async () => {
+  const repo = gitRepo();
+  const finding = { id: 'A1', category: 'coverage', severity: 'high', location: 'spec.md FR-001', summary: 'FR-001 has no task', recommendation: 'add a task' };
+  const host: HostScript = (step, base) =>
+    step.host!.schema === 'AnalysisSynthesis' ? { findings: [{ ...finding, found_by: 'both' }], coverage: [{ requirement: 'FR-001', tasks: [], note: 'gap' }], unmapped_tasks: [] } : hostScript(step, base);
+  const claude = new FakeAgent('claude', implementerWrites);
+  const ctx = makeRun(repo, { claude, codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'tasks' });
+  const FD = join(ctx.dir, 'features', 'F1');
+  assert.ok(!existsSync(join(FD, 'analysis.claude.json')), 'quick depth does not analyze unasked');
+  writeFileSync(join(FD, 'analyze.requested'), 'now\n');
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'analyze' });
+  assert.equal(ctx.state.status, 'paused');
+  const analyzers = claude.calls.filter((c) => c.role === 'analyzer');
+  assert.equal(analyzers.length, 1);
+  assert.equal(analyzers[0].writable, false);
+  const meta = readJson(join(FD, 'feature.json'));
+  const report = readFileSync(join(meta.specDir, 'analysis.md'), 'utf8');
+  assert.match(report, /^# Specification Analysis Report/);
+  assert.match(report, /\| A1 \| coverage \| HIGH \| spec\.md FR-001 \| FR-001 has no task \| add a task \| both \|/);
+  assert.match(report, /Coverage: 0% \(0\/1 with ≥1 task\)/);
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'converge' });
+  const impl = claude.calls.find((c) => c.role === 'implementer')!;
+  assert.match(impl.prompt, /<input name="analysis_findings">[\s\S]*FR-001 has no task/);
+});
+
+test('deep runs analyze automatically, but not runs that were already implementing', async () => {
+  const deep = makeRun(gitRepo(), { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'deep' });
+  const host: HostScript = (step, base) => (step.host!.schema === 'MergedQuestions' ? { questions: [] } : hostScript(step, base));
+  await drive(deep, host, withConflict(() => 'suggested'));
+  assert.ok(existsSync(join(deep.dir, 'features', 'F1', 'analysis.json')));
+  assert.ok(locate(deep).done.some((s: any) => s.id === 'F1/analyze'));
+
+  const legacy = makeRun(gitRepo(), { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'deep' });
+  await drive(legacy, host, withConflict(() => 'suggested'), 200, { phase: 'tasks' });
+  mkdirSync(join(legacy.dir, 'features', 'F1', 'tasks', 'T001'), { recursive: true }); // implementation had begun
+  await drive(legacy, host, withConflict(() => 'suggested'), 200, { phase: 'converge' });
+  assert.ok(!existsSync(join(legacy.dir, 'features', 'F1', 'analysis.json')));
+});
+
+test('hand edits to spec.md before implementing are folded back in and the plan is redone', async () => {
+  const repo = gitRepo();
+  const claude = new FakeAgent('claude', implementerWrites);
+  let reconciled: any = null;
+  const host: HostScript = (step, base) => {
+    if (step.id.includes('spec-reconcile')) {
+      reconciled = step.host!.inputs;
+      return { ...base, title: 'Edited title' };
+    }
+    return hostScript(step, base);
+  };
+  const ctx = makeRun(repo, { claude, codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'plan' });
+  const FD = join(ctx.dir, 'features', 'F1');
+  const meta = readJson(join(FD, 'feature.json'));
+  const plannersBefore = claude.calls.filter((c) => c.role === 'planner').length;
+  writeFileSync(join(meta.specDir, 'spec.md'), readFileSync(join(meta.specDir, 'spec.md'), 'utf8') + '\n- **FR-099**: System MUST also wave.\n');
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'plan' });
+  assert.ok(reconciled, 'a reconcile host step ran');
+  assert.match(reconciled.edited_markdown, /spec\.md$/);
+  assert.equal(readJson(join(FD, 'spec-final.json')).title, 'Edited title');
+  assert.match(readFileSync(join(meta.specDir, 'spec.md'), 'utf8'), /^# Feature Specification: Edited title/, 're-rendered from the new JSON');
+  assert.equal(claude.calls.filter((c) => c.role === 'planner').length, plannersBefore + 1, 'plan redone on the edited spec');
+  assert.ok(readdirSync(join(FD, 'superseded')).some((d) => d.endsWith('spec-edited')));
+  // Ticking checkboxes in tasks.md is progress, not an edit; edits after implementation starts are left alone.
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'converge' });
+  writeFileSync(join(meta.specDir, 'plan.md'), 'rewritten');
+  assert.ok(!locate(ctx).step, 'nothing to reconcile once implemented');
+});
+
+test('a spec written with Spec Kit is adopted: imported, then researched, clarified and planned by both models', async () => {
+  const repo = gitRepo();
+  const ctx = makeRun(repo, { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  ctx.state.mode = 'single';
+  ctx.state.adopted = { spec_dir: 'specs/007-dark-mode' };
+  writeFileSync(join(ctx.dir, 'adopted-spec.md'), '# Feature Specification: Dark mode\n\n**Input**: User description: "add dark mode"\n');
+  let imported: any = null;
+  const host: HostScript = (step, base) => {
+    if (step.id === 'F1/specify') imported = step;
+    return hostScript(step, base);
+  };
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'plan' });
+  assert.equal(imported.title, 'F1: import your Spec Kit spec');
+  assert.match(imported.host.inputs.spec_md, /adopted-spec\.md$/);
+  assert.match(imported.host.instructions, /import a Spec Kit spec/);
+  const meta = readJson(join(ctx.dir, 'features', 'F1', 'feature.json'));
+  assert.equal(meta.number, '007');
+  assert.match(meta.specDir, /specs\/007-dark-mode$/);
+  assert.equal(readJson(join(ctx.dir, 'decomposition.json')).features[0].title, 'Dark mode');
+  assert.ok(existsSync(join(meta.specDir, 'plan.md')));
+});
+
+test('workspace "inplace": a single feature is built on a Spec Kit-style NNN-slug branch in the checkout', async () => {
+  const repo = gitRepo();
+  const ctx = makeRun(repo, { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick', config: { workspace: 'inplace' } });
+  ctx.state.mode = 'single';
+  writeFileSync(join(ctx.dir, 'request.md'), 'dark mode\n');
+  await drive(ctx, hostScript, withConflict(() => 'suggested'), 200, { phase: 'converge' });
+  assert.equal(ctx.state.status, 'done');
+  const meta = readJson(join(ctx.dir, 'features', 'F1', 'feature.json'));
+  assert.equal(meta.worktree, repo);
+  assert.equal(meta.branch, '001-dark-mode');
+  assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD'), '001-dark-mode');
+  assert.ok(existsSync(join(repo, 'specs', '001-dark-mode', 'tasks.md')));
+  assert.match(git(repo, 'log', '--format=%s'), /feat\(001\/T002\): Wire up/);
+
+  const dirtyRepo = gitRepo();
+  writeFileSync(join(dirtyRepo, 'src', 'index.ts'), 'export const x = 2;\n');
+  const dirty = makeRun(dirtyRepo, { claude: new FakeAgent('claude'), codex: new FakeAgent('codex') }, { depth: 'quick', config: { workspace: 'inplace' } });
+  dirty.state.mode = 'single';
+  await assert.rejects(drive(dirty, hostScript, () => 'suggested', 200, { phase: 'specify' }), /needs it clean; commit or stash first:\n M src\/index\.ts/);
 });

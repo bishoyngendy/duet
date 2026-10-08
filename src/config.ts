@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { exists, readJson } from './util.ts';
+import type { PanesMode } from './panes.ts';
 import type { AgentName } from './schemas.ts';
 
 export type Depth = 'quick' | 'standard' | 'deep';
@@ -21,7 +22,7 @@ export function resolveAgent(cfg: AgentConfig, role: string): { model: string; e
 export type Config = {
   agents: Record<AgentName, AgentConfig>;
   depth: Depth;
-  /** Agent that performs host steps (synthesis) when `duet run --headless` is used. */
+  /** Agent that performs host steps (synthesis) when `duetto run --headless` is used. */
   synthesizer_fallback: AgentName;
   first_implementer: AgentName;
   /** Max tasks implemented at once, each in its own worktree (independent tasks with disjoint files_in_scope). 1 = serial. */
@@ -42,6 +43,17 @@ export type Config = {
   checks: { setup: string | null; commands: string[]; timeout_minutes: number };
   protected_paths: string[];
   worktrees_dir: string | null;
+  /**
+   * Where a feature is built. 'worktree' (default): its own git worktree and branch, your checkout untouched.
+   * 'inplace' (single-feature `duetto specify` runs): a Spec Kit-style NNN-slug branch in your checkout, which must
+   * be clean and which duetto commits to. Parallel tasks still use their own worktrees.
+   */
+  workspace: 'worktree' | 'inplace';
+  /**
+   * panes: open live Claude/Codex panes next to the orchestrator ('auto' = in cmux or tmux when detected).
+   * heartbeat_seconds: progress line while a step runs (0 = off). stall_minutes: warn when a worker goes quiet.
+   */
+  ui: { panes: PanesMode; heartbeat_seconds: number; stall_minutes: number };
 };
 
 export const DEFAULT_CONFIG: Config = {
@@ -66,6 +78,8 @@ export const DEFAULT_CONFIG: Config = {
   checks: { setup: null, commands: [], timeout_minutes: 20 },
   protected_paths: ['.env', '.env.*', '**/.env', '**/.env.*', '**/*.pem', '**/*.key', '**/secrets/**', '.github/workflows/**'],
   worktrees_dir: null,
+  workspace: 'worktree',
+  ui: { panes: 'auto', heartbeat_seconds: 60, stall_minutes: 10 },
 };
 
 function merge<T>(base: T, over: any): T {
@@ -78,11 +92,11 @@ function merge<T>(base: T, over: any): T {
 }
 
 export function loadConfig(repo: string): Config {
-  const p = join(repo, '.duet', 'config.json');
+  const p = join(repo, '.duetto', 'config.json');
   return exists(p) ? merge(DEFAULT_CONFIG, readJson(p)) : DEFAULT_CONFIG;
 }
 
-/** Best-effort detection of install/test commands for `duet init`. */
+/** Best-effort detection of install/test commands for `duetto init`. */
 export function detectChecks(repo: string): Config['checks'] {
   const checks: Config['checks'] = { setup: null, commands: [], timeout_minutes: 20 };
   const pkgPath = join(repo, 'package.json');

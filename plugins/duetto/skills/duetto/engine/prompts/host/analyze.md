@@ -1,0 +1,2 @@
+# Host step: merge the specification analyses
+Both engineers audited spec, plan and tasks. Merge their findings into one deduplicated list: combine duplicates (found_by "both"), keep each distinct finding with the sharper wording and a concrete recommendation, and settle severity by the guide in the inputs (constitution conflicts are always critical). Drop a finding only if you verify it is wrong. Merge the coverage maps into one, listing every requirement / acceptance / success criterion id with the tasks that cover it.

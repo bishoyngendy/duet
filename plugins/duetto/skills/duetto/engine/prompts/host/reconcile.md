@@ -1,0 +1,2 @@
+# Host step: fold the user's hand edits back in
+The user edited the markdown rendering of this artifact by hand (Spec Kit users do this between commands). Produce the artifact's JSON with every edit applied. For what the markdown shows, the markdown is now the source of truth; keep ids stable unless the user renamed them, and keep fields the markdown does not show (e.g. task files_in_scope details) unless an edit clearly changes them. Do not "improve" anything the user didn't touch.

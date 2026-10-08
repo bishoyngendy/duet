@@ -19,7 +19,7 @@ export async function currentBranch(cwd: string): Promise<string> {
 }
 
 export function worktreePath(repo: string, worktreesDir: string | null, runId: string, featureId: string): string {
-  const root = worktreesDir ?? join(homedir(), '.duet', 'worktrees');
+  const root = worktreesDir ?? join(homedir(), '.duetto', 'worktrees');
   return join(root, `${basename(repo)}-${sha(repo).slice(0, 8)}`, runId, featureId);
 }
 
@@ -71,7 +71,7 @@ export async function commitAll(wt: string, message: string): Promise<string | n
   await stageAll(wt);
   const status = await git(wt, 'status', '--porcelain');
   if (!status) return null;
-  // --no-verify: duet runs the project's checks itself before committing.
+  // --no-verify: duetto runs the project's checks itself before committing.
   await git(wt, 'commit', '-q', '--no-verify', '-m', message);
   return head(wt);
 }

@@ -1,19 +1,40 @@
-# duet
+# Duetto
 
 Claude Code × Codex CLI, spec-driven. One idea in → independently researched, clarified, planned, challenged,
 implemented and cross-reviewed features out, with every artifact on disk.
 
 ```
-/duet "add checkpoint reminders"        (Claude Code)
-$duet "add checkpoint reminders"        (Codex)
+/duetto "add checkpoint reminders"        (Claude Code)
+$duetto "add checkpoint reminders"        (Codex)
 ```
+
+> Formerly **duet**. Existing `.duet/` folders are moved to `.duetto/` automatically the first time you run
+> `duetto`; runs in progress carry on.
+
+## Commands
+
+Spec Kit-style, one phase at a time. Each runs Claude ∥ Codex for that phase, then stops:
+
+```sh
+duetto specify "add checkpoint reminders"   # research + spec draft → specs/NNN-add-checkpoint-reminders/
+duetto clarify                              # both models question the draft; your answers revise the spec
+duetto plan                                 # independent plans, rebuttal, synthesis, adversarial challenge
+duetto tasks                                # Spec Kit tasks.md; [P] tasks are implemented concurrently
+duetto analyze                              # optional: both models audit spec/plan/tasks → analysis.md
+duetto implement                            # alternating implement → checks → cross-review per task
+duetto converge                             # whole-feature audit against the spec, then report.md
+```
+
+They act on the current feature: `--feature <NNN|slug|dir>`, else Spec Kit's `SPECIFY_FEATURE*` / `.specify/feature.json`,
+else the branch or the current run. `duetto start "<idea>"` is the autopilot: all phases, and it may split a big idea
+into several stacked features.
 
 ## How it works
 
-- **`duet`** (this repo) is a deterministic engine: state, worker launching (`claude -p`, `codex exec`), git
+- **`duetto`** (this repo) is a deterministic engine: state, worker launching (`claude -p`, `codex exec`), git
   worktrees, running checks, schema validation. It never synthesizes or decides.
 - **Your session is the orchestrator.** When synthesis is needed the engine pauses (`needs_synthesis`); the
-  `/duet` skill has the session read both models' outputs, write the merge, and `duet submit` it.
+  `/duetto` skill has the session read both models' outputs, write the merge, and `duetto submit` it.
 - **You decide** anything non-minor. Conflicts in requirements / architecture / security / constitution are always
   escalated to you, even if the host marked them resolved (bias guard — the host is one of the two models).
 
@@ -21,8 +42,8 @@ $duet "add checkpoint reminders"        (Codex)
 scan (C∥X) → decompose (host) → ⛔ approve split
 per feature, in dependency order, on a stacked branch + worktree:
   research (C∥X) → rebuttal (C∥X) → synthesis (host)
-  clarify (C∥X) → merge (host) → ⛔ answers        × up to N rounds
-  spec (host)
+  spec draft (host)
+  clarify against the draft (C∥X) → merge (host) → ⛔ answers   × up to N rounds → spec revision (host)
   plan (C∥X) → rebuttal (C∥X) → synthesis (host) → ⛔ escalated conflicts → finalize (host)
   challenge (C∥X) → fold in (host) → ⛔ new ambiguities
   tasks DAG (host) → commit specs/NNN-slug/
@@ -31,7 +52,49 @@ per feature, in dependency order, on a stacked branch + worktree:
   converge audit → ⛔ fix/accept → report.md
 ```
 
-`--depth quick` skips rebuttals and challenge and does one clarify round; `deep` does three.
+`--depth quick` skips rebuttals and challenge and does one clarify round; `deep` does three and always runs `analyze`.
+
+## Spec Kit
+
+Duetto is built to sit on top of [GitHub Spec Kit](https://github.com/github/spec-kit). It follows the same phases
+(specify → clarify → plan → tasks → implement → converge) and writes features to the same `specs/NNN-name/`
+folders. In a project with `.specify/` (from `specify init`), duetto:
+
+- gives every agent Spec Kit's constitution (`.specify/memory/constitution.md`);
+- resolves templates through Spec Kit's own `resolve-template.sh`, so overrides, presets and extensions apply;
+- numbers features the way Spec Kit's `create-new-feature.sh` does.
+
+You can mix it with plain Spec Kit:
+
+- **Hand edits.** Edit `spec.md`, `plan.md` or `tasks.md` between commands as you would with Spec Kit. Before
+  implementation starts, duetto folds your edit back into its structured artifacts and redoes what was planned from
+  the old version.
+- **Adoption.** Wrote a spec with `/speckit-specify`? Run `duetto clarify` or `duetto plan` (it follows
+  `.specify/feature.json`, or use `--feature 003`). Duetto imports that `spec.md` and both models take it from there.
+
+Without `.specify/`, duetto uses `.duetto/constitution.md` and bundled copies of Spec Kit's templates (MIT, see
+`templates/speckit/LICENSE`). It never creates `.specify/` itself: run `specify init --here` for that.
+
+## Watching Claude and Codex live
+
+Every worker streams what it is doing: thinking, commands, files read or edited, searches. In cmux or tmux, `duetto run`
+opens a Claude pane and a Codex pane beside the orchestrator automatically (`ui.panes`: `auto` | `cmux` | `tmux` |
+`off`). Each pane closes itself when the run finishes. Anywhere else:
+
+```sh
+duetto watch                  # both agents, stacked, live
+duetto watch --agent codex    # follow one agent
+duetto watch --compact        # one line per activity, for pipes
+duetto panes                  # reopen the panes
+```
+
+Transcripts live in `.duetto/runs/<run>/live/{claude,codex}.log`.
+
+The orchestrating session never runs the engine in its own shell. `duetto run --detach` starts an independent
+runner, and `duetto watch --milestones` follows it until it pauses. Every step line shows where the run is
+(`step 12 · F1 1/2 · T003 3/7 · 1h04m elapsed`). While a step runs, a `⏱` heartbeat (`ui.heartbeat_seconds`, default
+60) says what Claude and Codex are doing, and a `⚠` warning flags a worker that has been silent for
+`ui.stall_minutes` (default 10).
 
 ## Install
 
@@ -40,28 +103,40 @@ dependency-free and ships pre-built inside the skill.
 
 **Claude Code**
 ```sh
-claude plugin marketplace add bishoyngendy/duet     # or a local path
-claude plugin install duet@duet
+claude plugin marketplace add bishoyngendy/duetto     # or a local path
+claude plugin install duetto@duetto
 ```
 
 **Codex CLI**
 ```sh
-codex plugin marketplace add bishoyngendy/duet      # or a local path
-codex plugin add duet@duet
+codex plugin marketplace add bishoyngendy/duetto      # or a local path
+codex plugin add duetto@duetto
 ```
 
-The repo is both a Claude Code marketplace (`.claude-plugin/marketplace.json`) and a Codex marketplace
-(`.agents/plugins/marketplace.json`). Both point at `plugins/duet/`, which contains one skill with the engine
-bundled at `skills/duet/engine/`.
+The plugin gives you `/duetto` (autopilot) plus one skill per phase: `/duetto-specify`, `/duetto-clarify`,
+`/duetto-plan`, `/duetto-tasks`, `/duetto-analyze`, `/duetto-implement`, `/duetto-converge` (`$duetto-…` in Codex).
 
-Check the setup with `node <skill-dir>/engine/bin/duet.mjs agent-test`: both CLIs must return valid output, be able to run
+The repo is both a Claude Code marketplace (`.claude-plugin/marketplace.json`) and a Codex marketplace
+(`.agents/plugins/marketplace.json`). Both point at `plugins/duetto/`; the engine is bundled at
+`skills/duetto/engine/` and the per-phase skills use it from there.
+
+**Spec Kit extension** (optional, for `/speckit-duetto-plan` etc. alongside Spec Kit's own commands; needs the
+plugin above for the engine):
+```sh
+git clone https://github.com/bishoyngendy/duetto
+specify extension add --dev duetto/speckit/duetto
+```
+It also offers a hook after `/speckit-tasks` to run the dual-model analysis.
+
+Check the setup with `node <skill-dir>/engine/bin/duetto.mjs agent-test`: both CLIs must return valid output, be able to run
 commands, and be unable to write in read-only mode.
 
 ### Developing
 
 ```sh
-sh scripts/install.sh   # dev: links ~/.local/bin/duet (runs src/*.ts directly) and the skill into both CLIs
-npm run build           # src/*.ts → plugins/duet/skills/duet/engine/**/*.mjs (Node's built-in type stripping)
+sh scripts/install.sh   # dev: links ~/.local/bin/duetto (runs src/*.ts directly) and the skill into both CLIs
+npm run build           # src/*.ts → plugins/duetto/skills/duetto/engine/**/*.mjs (Node's built-in type stripping),
+                        # plus the per-phase skills and speckit/duetto/ from packaging/commands.json
 npm test                # suite against the sources (Node ≥ 22.18 / 23.6 for type stripping)
 npm run test:built      # same suite against the built engine
 ```
@@ -71,7 +146,7 @@ Commit the build output: plugin installs pull from git and run no build step. CI
 ## In a project
 
 ```sh
-duet init     # .duet/config.json (models, checks, protected paths) + constitution.md
+duetto init     # .duetto/config.json (models, checks, protected paths) + constitution.md
 ```
 
 Edit `checks.setup` (e.g. `pnpm install --frozen-lockfile`, run in each fresh worktree) and `checks.commands`
@@ -84,29 +159,34 @@ Other useful settings in `config.json`:
   when their dependencies are done and their `files_in_scope` globs can't overlap; each gets its own worktree (running
   `checks.setup`), and its commit is cherry-picked onto the feature branch. A task that still conflicts is redone on top
   of the merged work. `1` keeps implementation strictly serial.
+- `workspace` (default `worktree`): each feature is built in its own git worktree and branch, leaving your checkout
+  alone. `inplace` builds a `duetto specify` feature the Spec Kit way, on an `NNN-slug` branch in your checkout. The
+  checkout must be clean, duetto commits to it, and you shouldn't edit it while a run is going.
 - `review.blocking` (default `critical/high/medium`) lists severities that force another round even if the reviewer approved.
 - `review.polish` (default `low`) and `review.polish_rounds` (default `1`) control the polish round: when a review approves with these findings, the implementer addresses or disputes them in one extra round. That round is gated by the checks, not re-reviewed; if checks fail it goes back to review.
 - `escalate_categories` lists conflict categories the host may never settle on its own.
 
-Read-only roles can run commands (tests, probes) but can't write: Claude runs inside Claude Code's OS sandbox with the working tree write-denied, and Codex runs with `-s read-only`. Reviewers are also checked against a before/after snapshot of the worktree. `duet agent-test` verifies both properties.
+Read-only roles can run commands (tests, probes) but can't write: Claude runs inside Claude Code's OS sandbox with the working tree write-denied, and Codex runs with `-s read-only`. Reviewers are also checked against a before/after snapshot of the worktree. `duetto agent-test` verifies both properties.
 
 | Path | What | Git |
 |---|---|---|
 | `specs/NNN-slug/{spec,plan,tasks,research,decisions,report}.md` | human artifacts | committed on the feature branch |
-| `.duet/config.json`, `constitution.md` | project settings | commit them |
-| `.duet/runs/<run>/` | state, events, per-model JSON, raw agent I/O | ignored |
-| `~/.duet/worktrees/…` | one worktree per feature | — |
+| `.duetto/config.json`, `constitution.md` | project settings | commit them |
+| `.duetto/runs/<run>/` | state, events, per-model JSON, raw agent I/O | ignored |
+| `~/.duetto/worktrees/…` | one worktree per feature | — |
 
 ## CLI
 
 ```
-duet start "<idea>" [--depth quick|standard|deep] [--headless]
-duet run [--headless]          advance until host/user is needed (re-run after any failure; nothing is redone)
-duet status [--json]
-duet next [--json]             pending synthesis task or questions
-duet submit <draft.json>
-duet answer Q1=B Q2="free text" [--accept-suggested]
-duet log | duet runs | duet use <run>
+duetto start "<idea>" [--depth quick|standard|deep] [--headless]
+duetto run [--headless] [--detach] [--until <phase> [--feature F1]]
+                               advance until host/user is needed (re-run after any failure; nothing is redone);
+                               --until stops after specify|clarify|plan|tasks|analyze|implement|converge
+duetto status [--json]
+duetto next [--json]             pending synthesis task or questions
+duetto submit <draft.json>
+duetto answer Q1=B Q2="free text" [--accept-suggested]
+duetto log | duetto runs | duetto use <run>
 ```
 
 `--headless` lets `synthesizer_fallback` (default claude) do host steps, for unattended runs; question gates still wait for you.

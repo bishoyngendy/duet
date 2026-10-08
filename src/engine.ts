@@ -1,11 +1,14 @@
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { runAgent } from './agents/index.ts';
-import { pipeline, type Ctx, type Step } from './pipeline.ts';
+import { liveCall } from './live.ts';
+import { openPanes } from './panes.ts';
+import { progressNote, startHeartbeat } from './progress.ts';
+import { PHASES, pipeline, type Ctx, type Phase, type Step } from './pipeline.ts';
 import { validate } from './schema.ts';
-import { SCHEMAS, type Answer, type MergedQ } from './schemas.ts';
+import { SCHEMAS, type Answer, type Feature, type MergedQ } from './schemas.ts';
 import { acquireLock, logEvent, saveState } from './state.ts';
-import { appendLine, exists, writeJson } from './util.ts';
+import { appendLine, exists, readJson, topoSort, writeJson } from './util.ts';
 
 export function locate(ctx: Ctx): { step: Step | null; done: Step[] } {
   const done: Step[] = [];
@@ -24,17 +27,42 @@ function setStatus(ctx: Ctx, status: Ctx['state']['status'], step: Step | null, 
 }
 
 /** Advance until a host step, a user gate, completion or failure. */
-export async function advance(ctx: Ctx, opts: { headless?: boolean; maxSteps?: number } = {}): Promise<Ctx['state']['status']> {
+export type Until = { phase: Phase; feature?: string };
+
+/**
+ * Whether a step lies past `until`: in a later phase of the target feature (or of any feature when none is named),
+ * or in a feature after the target. Earlier features are dependencies of the target, so they always run.
+ */
+export function beyond(ctx: Ctx, step: Step, until: Until): boolean {
+  const rank = (p?: Phase) => PHASES.indexOf(p ?? 'scan');
+  if (until.feature && step.feature && step.feature !== until.feature) {
+    const order = topoSort(readJson<{ features: Feature[] }>(join(ctx.dir, 'decomposition.json')).features).map((f) => f.id);
+    return order.indexOf(step.feature) > order.indexOf(until.feature);
+  }
+  return rank(step.phase) > rank(until.phase);
+}
+
+export async function advance(ctx: Ctx, opts: { headless?: boolean; maxSteps?: number; panes?: boolean; until?: Until } = {}): Promise<Ctx['state']['status']> {
   const release = acquireLock(ctx.dir);
+  if (opts.until) ctx.state.until = opts.until;
+  const until = (ctx.state.until ?? undefined) as Until | undefined;
   let steps = 0;
+  let announced = false;
   try {
     for (;;) {
-      const { step } = locate(ctx);
+      const { step, done } = locate(ctx);
       if (!step) {
         setStatus(ctx, 'done', null, 'All features complete.');
         logEvent(ctx.dir, { type: 'done' });
         ctx.print('✔ run complete');
         return 'done';
+      }
+      if (until && beyond(ctx, step, until)) {
+        const where = `${until.feature ? `${until.feature} ` : ''}${until.phase}`;
+        setStatus(ctx, 'paused', step, `Reached the end of ${where}. Next: ${step.title} — run \`duetto ${step.phase}\` to continue.`);
+        logEvent(ctx.dir, { type: 'paused', step: step.id, until });
+        ctx.print(`⏹ ${where} complete — next is ${step.title} (duetto ${step.phase})`);
+        return 'paused';
       }
       if (opts.maxSteps !== undefined && steps++ >= opts.maxSteps) {
         setStatus(ctx, 'idle', step);
@@ -43,20 +71,36 @@ export async function advance(ctx: Ctx, opts: { headless?: boolean; maxSteps?: n
       if (step.kind === 'user') {
         setStatus(ctx, 'needs_answers', step);
         logEvent(ctx.dir, { type: 'gate', step: step.id });
-        ctx.print(`⏸ ${step.title} — waiting for your answers (duet next)`);
+        ctx.print(`⏸ ${step.title} — waiting for your answers (duetto next)`);
         return 'needs_answers';
       }
       if (step.kind === 'host' && !opts.headless) {
         setStatus(ctx, 'needs_synthesis', step);
         logEvent(ctx.dir, { type: 'host', step: step.id });
-        ctx.print(`⏸ ${step.title} — waiting for the orchestrator session (duet next)`);
+        ctx.print(`⏸ ${step.title} — waiting for the orchestrator session (duetto next)`);
         return 'needs_synthesis';
       }
       setStatus(ctx, 'running', step);
-      ctx.print(`▶ ${step.title}`);
-      logEvent(ctx.dir, { type: 'step_start', step: step.id });
-      if (step.kind === 'host') await runHostHeadless(ctx, step);
-      else await step.run!();
+      if (!announced && step.kind !== 'deterministic') {
+        announced = true;
+        ctx.print(opts.panes ? await openPanes({ dir: ctx.dir, repo: ctx.repo, runId: ctx.state.id, mode: ctx.config.ui.panes }) : 'Watch Claude and Codex live: duetto watch');
+      }
+      ctx.print(`▶ ${step.title}  [${progressNote(ctx.dir, step.id, done.length + 1, ctx.state.created_at)}]`);
+      logEvent(ctx.dir, { type: 'step_start', step: step.id, title: step.title });
+      const stopHeartbeat = startHeartbeat({
+        dir: ctx.dir,
+        stepId: step.id,
+        seconds: ctx.config.ui.heartbeat_seconds,
+        stallMinutes: ctx.config.ui.stall_minutes,
+        print: ctx.print,
+        log: (line) => logEvent(ctx.dir, { type: 'heartbeat', step: step.id, line }),
+      });
+      try {
+        if (step.kind === 'host') await runHostHeadless(ctx, step);
+        else await step.run!();
+      } finally {
+        stopHeartbeat();
+      }
       if (!step.done()) throw new Error(`Step ${step.id} finished without producing its output`);
       logEvent(ctx.dir, { type: 'step_done', step: step.id });
     }
@@ -65,7 +109,7 @@ export async function advance(ctx: Ctx, opts: { headless?: boolean; maxSteps?: n
     const { step } = safeLocate(ctx);
     setStatus(ctx, 'failed', step, message);
     logEvent(ctx.dir, { type: 'failed', step: step?.id, message });
-    ctx.print(`✖ ${message}\n  Fix the cause and run \`duet run\` again — completed work is kept.`);
+    ctx.print(`✖ ${message}\n  Fix the cause and run \`duetto run\` again — completed work is kept.`);
     return 'failed';
   } finally {
     release();
@@ -135,6 +179,9 @@ async function runHostHeadless(ctx: Ctx, step: Step) {
     .join('\n\n');
   const prompt = `${h.instructions}\n\n(You are running headless: return the JSON directly instead of submitting a file.)\n\n# Inputs\n${inputs}\n\n# Output\nReturn only the JSON object described by the schema.`;
   ctx.print(`    ${agent} ▸ synthesizer (headless)…`);
+  const label = `${step.id.replace(/[^\w.-]+/g, '__')}.host-${agent}`;
+  const live = liveCall(ctx.dir, agent, { label, step: step.id, role: 'synthesizer' });
+  const started = Date.now();
   const res = await runAgent(ctx.agents[agent], {
     role: 'synthesizer',
     prompt,
@@ -142,9 +189,14 @@ async function runHostHeadless(ctx: Ctx, step: Step) {
     writable: false,
     schema: SCHEMAS[h.schema],
     rawDir: join(ctx.dir, 'raw'),
-    label: `${step.id.replace(/[^\w.-]+/g, '__')}.host-${agent}`,
+    label,
     timeoutMs: ctx.config.timeout_minutes * 60_000,
+    onActivity: live.onActivity,
+  }).catch((err) => {
+    live.end({ ok: false, ms: Date.now() - started, error: (err as Error).message });
+    throw err;
   });
+  live.end({ ok: true, ms: res.durationMs, costUsd: res.costUsd });
   await acceptHostOutput(ctx, step, res.output);
   logEvent(ctx.dir, { type: 'submit', step: step.id, by: agent, duration_ms: res.durationMs, cost_usd: res.costUsd });
 }

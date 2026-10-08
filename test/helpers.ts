@@ -47,20 +47,21 @@ export class FakeAgent implements Agent {
   }
   async invoke(call: AgentCall): Promise<AgentOutput> {
     this.calls.push(call);
+    call.onActivity?.({ kind: 'message', text: `${this.name} doing ${call.role} work` });
     const out = this.behaviour(call, fakeFromSchema(call.schema));
     return { text: JSON.stringify(out), raw: '' };
   }
 }
 
 export function gitRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'duet-e2e-'));
+  const dir = mkdtempSync(join(tmpdir(), 'duetto-e2e-'));
   const g = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
   g('init', '-q', '-b', 'main');
   g('config', 'user.email', 'test@example.com');
   g('config', 'user.name', 'Test');
   mkdirSync(join(dir, 'src'));
   writeFileSync(join(dir, 'src', 'index.ts'), 'export const x = 1;\n');
-  writeFileSync(join(dir, '.gitignore'), '.duet/runs/\n.duet/current\n');
+  writeFileSync(join(dir, '.gitignore'), '.duetto/runs/\n.duetto/current\n');
   g('add', '-A');
   g('commit', '-q', '-m', 'init');
   return dir;
@@ -73,7 +74,7 @@ export function git(dir: string, ...args: string[]): string {
 export function makeRun(repo: string, agents: Record<AgentName, Agent>, opts: { depth?: 'quick' | 'standard' | 'deep'; config?: any } = {}): Ctx {
   const config = { ...loadConfig(repo), ...(opts.config ?? {}) };
   config.checks = { setup: null, commands: ['true'], timeout_minutes: 1, ...(opts.config?.checks ?? {}) };
-  config.worktrees_dir = mkdtempSync(join(tmpdir(), 'duet-wt-'));
+  config.worktrees_dir = mkdtempSync(join(tmpdir(), 'duetto-wt-'));
   const id = newRunId('test idea');
   const dir = runDir(repo, id);
   const now = new Date().toISOString();
@@ -99,11 +100,11 @@ export type HostScript = (step: Step, base: any) => any;
 export type GateScript = (step: Step) => Record<string, string> | 'suggested';
 
 /** Drive a run to completion, answering host steps and gates with the given scripts. */
-export async function drive(ctx: Ctx, hostScript: HostScript, gateScript: GateScript, maxIterations = 200): Promise<string[]> {
+export async function drive(ctx: Ctx, hostScript: HostScript, gateScript: GateScript, maxIterations = 200, until?: any): Promise<string[]> {
   const visited: string[] = [];
   for (let i = 0; i < maxIterations; i++) {
-    const status = await advance(ctx);
-    if (status === 'done') return visited;
+    const status = await advance(ctx, { until });
+    if (status === 'done' || status === 'paused') return visited;
     if (status === 'failed') throw new Error(`run failed: ${ctx.state.message}`);
     const { step } = locate(ctx);
     if (!step) throw new Error('no step but not done');

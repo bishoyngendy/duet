@@ -1,2 +1,0 @@
-# Host step: break the plan into tasks
-Produce an ordered task DAG (ids T001, T002, …) that implements the final plan. Each task must be a self-contained brief an engineer can implement and a reviewer can verify in one pass: clear description, depends_on, files_in_scope (globs, including test files), acceptance checks, and a test_command when a targeted test exists. Prefer 3-10 tasks for a typical feature; each should leave the code building and tests passing.

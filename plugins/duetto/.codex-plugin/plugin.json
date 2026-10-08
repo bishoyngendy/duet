@@ -1,0 +1,37 @@
+{
+  "name": "duetto",
+  "version": "0.1.0",
+  "description": "Dual-model (Claude + Codex) spec-driven workflow: parallel research, clarifying questions, independent plans with rebuttal, adversarial plan challenge, task DAG, and alternating implement/review until converged.",
+  "author": {
+    "name": "Bishoy Gendy"
+  },
+  "keywords": [
+    "orchestration",
+    "multi-agent",
+    "codex",
+    "claude",
+    "spec-driven",
+    "code-review",
+    "workflow"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Duetto",
+    "shortDescription": "Claude × Codex spec-driven orchestration",
+    "longDescription": "Dual-model (Claude + Codex) spec-driven workflow: parallel research, clarifying questions, independent plans with rebuttal, adversarial plan challenge, task DAG, and alternating implement/review until converged.",
+    "developerName": "Bishoy Gendy",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "$duetto add a slugify utility with Unicode support"
+    ],
+    "websiteURL": "https://github.com/bishoyngendy/duetto"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/bishoyngendy/duetto",
+  "repository": "https://github.com/bishoyngendy/duetto"
+}
