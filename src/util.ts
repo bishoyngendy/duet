@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { lineSplitter } from './activity.ts';
 
 export const exists = (p: string) => existsSync(p);
 
@@ -83,10 +84,11 @@ const DRAIN_MS = 2000;
 export function exec(
   cmd: string,
   args: string[],
-  opts: { cwd: string; input?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = { cwd: process.cwd() },
+  opts: { cwd: string; input?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; onStdoutLine?: (line: string) => void } = { cwd: process.cwd() },
 ): Promise<ExecResult> {
   const started = Date.now();
   hookSignals();
+  const lines = opts.onStdoutLine ? lineSplitter(opts.onStdoutLine) : null;
   return new Promise((resolve, reject) => {
     const piped = opts.input !== undefined;
     // Own process group: a timeout kills the whole tree (test runners, build daemons), not just the CLI.
@@ -100,6 +102,7 @@ export function exec(
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
+      lines?.end();
       clearTimeout(timer);
       if (pid) liveGroups.delete(pid);
       resolve({ code: code ?? -1, stdout, stderr, timedOut, durationMs: Date.now() - started });
@@ -111,7 +114,11 @@ export function exec(
           setTimeout(() => pid && killGroup(pid, 'SIGKILL'), 5000).unref();
         }, opts.timeoutMs)
       : undefined;
-    child.stdout.on('data', (d) => (stdout += d));
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (d: string) => {
+      stdout += d;
+      lines?.push(d);
+    });
     child.stderr.on('data', (d) => (stderr += d));
     child.on('error', (err) => {
       clearTimeout(timer);

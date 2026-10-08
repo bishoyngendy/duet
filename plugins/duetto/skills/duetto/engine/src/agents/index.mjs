@@ -39,6 +39,7 @@ export async function runAgent(agent       , call           )                   
     if (lastErrors.length === 0) {
       return { output: value, durationMs: Date.now() - started, costUsd: cost || undefined, attempts: attempt };
     }
+    call.onActivity?.({ kind: 'retry', text: `output did not match the schema (${lastErrors.length} errors) — asking again` });
     prompt =
       call.prompt +
       `\n\n---\nYour previous response did not match the required JSON schema:\n${lastErrors.slice(0, 30).join('\n')}\n` +

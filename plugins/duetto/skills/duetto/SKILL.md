@@ -27,6 +27,12 @@ implementation yourself — the workers do. Your jobs: drive the loop, synthesiz
 They spawn `claude`/`codex` (network) and create worktrees under `~/.duetto/worktrees` — if your shell sandbox
 blocks that, re-run the command outside the sandbox / with escalated permissions.
 
+## Live views
+The first `duetto run` that starts a worker opens a live Claude pane and a live Codex pane beside this session when
+it runs inside cmux or tmux. Its first output line says whether it did. Tell the user once where to look: "live
+Claude/Codex panes are open on the right", or "run `duetto watch` in another terminal to follow Claude and Codex
+live". `duetto panes` reopens them if they were closed.
+
 ## The loop
 After `duetto run` exits, run `duetto status --json` and act on `status`:
 

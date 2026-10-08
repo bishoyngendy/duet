@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { exists, readJson } from './util.ts';
+import type { PanesMode } from './panes.ts';
 import type { AgentName } from './schemas.ts';
 
 export type Depth = 'quick' | 'standard' | 'deep';
@@ -42,6 +43,8 @@ export type Config = {
   checks: { setup: string | null; commands: string[]; timeout_minutes: number };
   protected_paths: string[];
   worktrees_dir: string | null;
+  /** panes: open live Claude/Codex panes next to the orchestrator ('auto' = in cmux or tmux when detected). */
+  ui: { panes: PanesMode };
 };
 
 export const DEFAULT_CONFIG: Config = {
@@ -66,6 +69,7 @@ export const DEFAULT_CONFIG: Config = {
   checks: { setup: null, commands: [], timeout_minutes: 20 },
   protected_paths: ['.env', '.env.*', '**/.env', '**/.env.*', '**/*.pem', '**/*.key', '**/secrets/**', '.github/workflows/**'],
   worktrees_dir: null,
+  ui: { panes: 'auto' },
 };
 
 function merge<T>(base: T, over: any): T {

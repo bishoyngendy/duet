@@ -1,0 +1,103 @@
+// Both CLIs' streaming events, normalised into one compact activity feed for the live views.
+
+export type ActivityKind = 'thinking' | 'message' | 'command' | 'file' | 'search' | 'tool' | 'retry' | 'answer';
+export type Activity = { kind: ActivityKind; text: string };
+
+/** Collapse whitespace and cap length so every activity fits on a terminal line or two. */
+export function oneLine(s: string, max = 240): string {
+  const t = s.replace(/\s+/g, ' ').trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/** Paths inside the working tree are shown relative to it. */
+const rel = (path: string, cwd: string) => (cwd && path.startsWith(cwd + '/') ? path.slice(cwd.length + 1) : path);
+
+function claudeTool(name: string, input: any, cwd: string): Activity {
+  switch (name) {
+    case 'Bash':
+      return { kind: 'command', text: String(input.command ?? '') };
+    case 'Read':
+      return { kind: 'file', text: `read ${rel(String(input.file_path ?? ''), cwd)}` };
+    case 'Edit':
+    case 'Write':
+    case 'NotebookEdit':
+      return { kind: 'file', text: `${name.toLowerCase()} ${rel(String(input.file_path ?? input.notebook_path ?? ''), cwd)}` };
+    case 'Grep':
+      return { kind: 'search', text: `grep ${input.pattern}${input.path ? ` in ${rel(String(input.path), cwd)}` : ''}` };
+    case 'Glob':
+      return { kind: 'search', text: `glob ${input.pattern}` };
+    case 'WebSearch':
+      return { kind: 'search', text: `web: ${input.query}` };
+    case 'WebFetch':
+      return { kind: 'search', text: `fetch ${input.url}` };
+    case 'StructuredOutput':
+      return { kind: 'answer', text: 'returned its structured answer' };
+    default:
+      return { kind: 'tool', text: `${name} ${JSON.stringify(input)}` };
+  }
+}
+
+/** One `claude -p --output-format stream-json --verbose` event → activities (main thread only). */
+export function claudeActivity(e: any, cwd = ''): Activity[] {
+  if (e?.type === 'system' && e.subtype === 'api_retry') return [{ kind: 'retry', text: `API retry ${e.attempt ?? ''}: ${e.error ?? ''}` }];
+  if (e?.type !== 'assistant' || e.parent_tool_use_id) return [];
+  return (e.message?.content ?? []).flatMap((b: any): Activity[] => {
+    if (b.type === 'thinking' && b.thinking?.trim()) return [{ kind: 'thinking', text: b.thinking }];
+    if (b.type === 'text' && b.text?.trim()) return [{ kind: 'message', text: b.text }];
+    if (b.type === 'tool_use') return [claudeTool(b.name, b.input ?? {}, cwd)];
+    return [];
+  });
+}
+
+/** `/bin/zsh -lc 'echo 42'` → `echo 42`, undoing the quoting codex adds around the inner command. */
+export function unwrapShell(cmd: string): string {
+  const m = cmd.match(/^\S*sh -lc (['"])([\s\S]*)\1$/);
+  if (!m) return cmd;
+  return m[1] === "'" ? m[2].replaceAll(`'"'"'`, "'").replaceAll(`'\\''`, "'") : m[2].replace(/\\(["\\$`])/g, '$1');
+}
+
+/** One `codex exec --json` event → activities. Commands show as they start; everything else when complete. */
+export function codexActivity(e: any, cwd = ''): Activity[] {
+  const it = e?.item;
+  if (!it || (e.type !== 'item.started' && e.type !== 'item.completed')) return [];
+  const done = e.type === 'item.completed';
+  switch (it.type) {
+    case 'command_execution':
+      if (!done) return [{ kind: 'command', text: unwrapShell(String(it.command ?? '')) }];
+      return it.exit_code ? [{ kind: 'command', text: `↳ exit ${it.exit_code}` }] : [];
+    case 'reasoning':
+      return done && it.text?.trim() ? [{ kind: 'thinking', text: it.text }] : [];
+    case 'agent_message':
+      return done && it.text?.trim() ? [{ kind: 'message', text: it.text }] : [];
+    case 'file_change':
+      return done ? [{ kind: 'file', text: (it.changes ?? []).map((c: any) => `${c.kind} ${rel(c.path, cwd)}`).join(', ') || 'file change' }] : [];
+    case 'web_search': {
+      const query = it.query || it.action?.query || it.action?.queries?.[0];
+      return done && query ? [{ kind: 'search', text: `web: ${query}` }] : [];
+    }
+    case 'mcp_tool_call':
+      return done ? [{ kind: 'tool', text: `${it.server}.${it.tool}${it.title ? ` — ${it.title}` : ''}` }] : [];
+    default:
+      return [];
+  }
+}
+
+/** Splits a byte stream into complete lines; the remainder waits for the next chunk. */
+export function lineSplitter(onLine: (line: string) => void): { push: (chunk: string) => void; end: () => void } {
+  let buf = '';
+  return {
+    push(chunk) {
+      buf += chunk;
+      let i: number;
+      while ((i = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        if (line.trim()) onLine(line);
+      }
+    },
+    end() {
+      if (buf.trim()) onLine(buf);
+      buf = '';
+    },
+  };
+}

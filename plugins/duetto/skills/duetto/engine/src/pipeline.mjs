@@ -10,6 +10,7 @@ import { bounceConflicts } from './conflict.mjs';
 import { runChecks,                  } from './checks.mjs';
                                           
 import { addWorktree, commitAll, diff, git, head, removeWorktree, restore, snapshot, worktreePath } from './git.mjs';
+import { liveCall } from './live.mjs';
 import { hostInstructions, workerPrompt } from './prompt.mjs';
 import * as render from './render.mjs';
 import { SCHEMAS,                                                                    } from './schemas.mjs';
@@ -64,6 +65,8 @@ async function callAgent(
   o                                                                                                ,
 )               {
   ctx.print(`    ${agent} ▸ ${o.role} (${o.stepId})…`);
+  const live = liveCall(ctx.dir, agent, { label: `${label(o.stepId)}.${agent}`, step: o.stepId, role: o.role });
+  const started = Date.now();
   const res = await runAgent(ctx.agents[agent], {
     role: o.role,
     prompt: o.prompt,
@@ -73,7 +76,12 @@ async function callAgent(
     rawDir: join(ctx.dir, 'raw'),
     label: `${label(o.stepId)}.${agent}`,
     timeoutMs: ctx.config.timeout_minutes * 60_000,
+    onActivity: live.onActivity,
+  }).catch((err) => {
+    live.end({ ok: false, ms: Date.now() - started, error: (err         ).message });
+    throw err;
   });
+  live.end({ ok: true, ms: res.durationMs, costUsd: res.costUsd });
   logEvent(ctx.dir, { type: 'agent', step: o.stepId, agent, role: o.role, duration_ms: res.durationMs, cost_usd: res.costUsd, attempts: res.attempts });
   ctx.print(`    ${agent} ✓ ${o.role} (${o.stepId}, ${fmtMs(res.durationMs)}${res.costUsd ? `, $${res.costUsd.toFixed(2)}` : ''})`);
   return res.output;

@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { lineSplitter } from './activity.mjs';
 
 export const exists = (p        ) => existsSync(p);
 
@@ -84,10 +85,11 @@ const DRAIN_MS = 2000;
 export function exec(
   cmd        ,
   args          ,
-  opts                                                                               = { cwd: process.cwd() },
+  opts                                                                                                                      = { cwd: process.cwd() },
 )                      {
   const started = Date.now();
   hookSignals();
+  const lines = opts.onStdoutLine ? lineSplitter(opts.onStdoutLine) : null;
   return new Promise((resolve, reject) => {
     const piped = opts.input !== undefined;
     // Own process group: a timeout kills the whole tree (test runners, build daemons), not just the CLI.
@@ -101,6 +103,7 @@ export function exec(
     const finish = (code               ) => {
       if (settled) return;
       settled = true;
+      lines?.end();
       clearTimeout(timer);
       if (pid) liveGroups.delete(pid);
       resolve({ code: code ?? -1, stdout, stderr, timedOut, durationMs: Date.now() - started });
@@ -112,7 +115,11 @@ export function exec(
           setTimeout(() => pid && killGroup(pid, 'SIGKILL'), 5000).unref();
         }, opts.timeoutMs)
       : undefined;
-    child.stdout.on('data', (d) => (stdout += d));
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (d        ) => {
+      stdout += d;
+      lines?.push(d);
+    });
     child.stderr.on('data', (d) => (stderr += d));
     child.on('error', (err) => {
       clearTimeout(timer);

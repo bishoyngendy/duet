@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { claudeActivity } from '../activity.ts';
 import { exec, tail, writeText } from '../util.ts';
 import { resolveAgent, type AgentConfig } from '../config.ts';
 import type { Agent, AgentCall, AgentOutput } from './types.ts';
@@ -32,8 +33,10 @@ export class ClaudeAgent implements Agent {
     const { model, effort } = resolveAgent(this.cfg, call.role);
     const args = [
       '-p',
+      // stream-json: activities arrive live; the final `result` event carries structured_output and cost.
       '--output-format',
-      'json',
+      'stream-json',
+      '--verbose',
       '--json-schema',
       JSON.stringify(call.schema),
       '--model',
@@ -58,17 +61,22 @@ export class ClaudeAgent implements Agent {
     }
     const cmd = this.cfg.command ?? 'claude';
     writeText(join(call.rawDir, `${call.label}.argv.json`), JSON.stringify([cmd, ...args.map((a) => (a.length > 300 ? a.slice(0, 300) + '…' : a))], null, 2));
-    const res = await exec(cmd, args, { cwd: call.cwd, input: call.prompt, timeoutMs: call.timeoutMs, env: childEnv() });
-    writeText(join(call.rawDir, `${call.label}.stdout.json`), res.stdout);
+    let parsed: any = null;
+    const onStdoutLine = (line: string) => {
+      let e: any;
+      try {
+        e = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (e.type === 'result') parsed = e;
+      for (const a of claudeActivity(e, call.cwd)) call.onActivity?.(a);
+    };
+    const res = await exec(cmd, args, { cwd: call.cwd, input: call.prompt, timeoutMs: call.timeoutMs, env: childEnv(), onStdoutLine });
+    writeText(join(call.rawDir, `${call.label}.stream.jsonl`), res.stdout);
     if (res.stderr) writeText(join(call.rawDir, `${call.label}.stderr.txt`), res.stderr);
     if (res.timedOut) throw new Error(`claude timed out after ${Math.round(call.timeoutMs / 60000)}m`);
-
-    let parsed: any;
-    try {
-      parsed = JSON.parse(res.stdout);
-    } catch {
-      throw new Error(`claude exited ${res.code} without JSON output: ${tail(res.stderr || res.stdout, 800)}`);
-    }
+    if (!parsed) throw new Error(`claude exited ${res.code} without a result event: ${tail(res.stderr || res.stdout, 800)}`);
     if (res.code !== 0 || parsed.is_error) {
       throw new Error(`claude failed (${parsed.subtype ?? res.code}): ${tail(String(parsed.result ?? res.stderr), 800)}`);
     }

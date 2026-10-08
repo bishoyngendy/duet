@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -6,7 +6,10 @@ import { createAgents, runAgent } from './agents/index.ts';
 import { DEFAULT_CONFIG, detectChecks, loadConfig, type Depth } from './config.ts';
 import { advance, answer, costSummary, gateView, hostTaskView, locate, submit } from './engine.ts';
 import { currentBranch, git, head, repoRoot } from './git.ts';
+import { liveDir } from './live.ts';
+import { openPanes } from './panes.ts';
 import type { Ctx } from './pipeline.ts';
+import { watch } from './watch.ts';
 import { SCHEMAS, type AgentName } from './schemas.ts';
 import { currentRunId, listRuns, loadState, logEvent, migrateLegacy, newRunId, duettoDir, runDir, saveState, setCurrentRun, type RunState } from './state.ts';
 import { exists, fmtMs, readJson, readText, writeJson, writeText } from './util.ts';
@@ -21,6 +24,8 @@ Usage:
   duetto next [--json]                The pending host task (synthesis) or questions for you
   duetto submit <file.json>           Submit the host's synthesis for the pending step
   duetto answer Q1=A Q2="free text" [--accept-suggested] [--file answers.json]
+  duetto watch [--agent claude|codex] [--compact]   Live view of what Claude and Codex are doing
+  duetto panes                        (Re)open live Claude/Codex panes in cmux or tmux
   duetto log [-n 40]                  Recent events
   duetto runs                         List runs;  duetto use <run-id> to switch
   duetto agent-test [--agent claude|codex]   Smoke-test both CLIs (schema output + read-only)
@@ -63,6 +68,7 @@ export async function main(argv: string[]): Promise<number> {
       agent: { type: 'string' },
       n: { type: 'string', short: 'n' },
       force: { type: 'boolean' },
+      compact: { type: 'boolean' },
     },
   });
 
@@ -74,10 +80,21 @@ export async function main(argv: string[]): Promise<number> {
       if (!idea) throw new Error('Usage: duetto start "<idea>"');
       const ctx = await start(idea, (v.depth as Depth) ?? undefined);
       if (v['no-run']) return 0;
-      return exitFor(await advance(ctx, { headless: v.headless }));
+      return exitFor(await advance(ctx, { headless: v.headless, panes: !v.headless }));
     }
     case 'run':
-      return exitFor(await advance(await context(v.run), { headless: v.headless }));
+      return exitFor(await advance(await context(v.run), { headless: v.headless, panes: !v.headless }));
+    case 'watch': {
+      const ctx = await context(v.run);
+      return watch(ctx.dir, { agent: v.agent, compact: v.compact });
+    }
+    case 'panes': {
+      const ctx = await context(v.run);
+      rmSync(join(liveDir(ctx.dir), 'panes.json'), { force: true });
+      const mode = ctx.config.ui.panes === 'off' ? 'auto' : ctx.config.ui.panes;
+      console.log(await openPanes({ dir: ctx.dir, repo: ctx.repo, runId: ctx.state.id, mode }));
+      return 0;
+    }
     case 'status':
       return status(await context(v.run), Boolean(v.json));
     case 'next':

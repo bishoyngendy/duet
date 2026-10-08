@@ -2,6 +2,8 @@
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { runAgent } from './agents/index.mjs';
+import { liveCall } from './live.mjs';
+import { openPanes } from './panes.mjs';
 import { pipeline,                     } from './pipeline.mjs';
 import { validate } from './schema.mjs';
 import { SCHEMAS,                           } from './schemas.mjs';
@@ -25,9 +27,10 @@ function setStatus(ctx     , status                        , step             , 
 }
 
 /** Advance until a host step, a user gate, completion or failure. */
-export async function advance(ctx     , opts                                            = {})                                  {
+export async function advance(ctx     , opts                                                             = {})                                  {
   const release = acquireLock(ctx.dir);
   let steps = 0;
+  let announced = false;
   try {
     for (;;) {
       const { step } = locate(ctx);
@@ -54,6 +57,10 @@ export async function advance(ctx     , opts                                    
         return 'needs_synthesis';
       }
       setStatus(ctx, 'running', step);
+      if (!announced && step.kind !== 'deterministic') {
+        announced = true;
+        ctx.print(opts.panes ? await openPanes({ dir: ctx.dir, repo: ctx.repo, runId: ctx.state.id, mode: ctx.config.ui.panes }) : 'Watch Claude and Codex live: duetto watch');
+      }
       ctx.print(`▶ ${step.title}`);
       logEvent(ctx.dir, { type: 'step_start', step: step.id });
       if (step.kind === 'host') await runHostHeadless(ctx, step);
@@ -136,6 +143,9 @@ async function runHostHeadless(ctx     , step      ) {
     .join('\n\n');
   const prompt = `${h.instructions}\n\n(You are running headless: return the JSON directly instead of submitting a file.)\n\n# Inputs\n${inputs}\n\n# Output\nReturn only the JSON object described by the schema.`;
   ctx.print(`    ${agent} ▸ synthesizer (headless)…`);
+  const label = `${step.id.replace(/[^\w.-]+/g, '__')}.host-${agent}`;
+  const live = liveCall(ctx.dir, agent, { label, step: step.id, role: 'synthesizer' });
+  const started = Date.now();
   const res = await runAgent(ctx.agents[agent], {
     role: 'synthesizer',
     prompt,
@@ -143,9 +153,14 @@ async function runHostHeadless(ctx     , step      ) {
     writable: false,
     schema: SCHEMAS[h.schema],
     rawDir: join(ctx.dir, 'raw'),
-    label: `${step.id.replace(/[^\w.-]+/g, '__')}.host-${agent}`,
+    label,
     timeoutMs: ctx.config.timeout_minutes * 60_000,
+    onActivity: live.onActivity,
+  }).catch((err) => {
+    live.end({ ok: false, ms: Date.now() - started, error: (err         ).message });
+    throw err;
   });
+  live.end({ ok: true, ms: res.durationMs, costUsd: res.costUsd });
   await acceptHostOutput(ctx, step, res.output);
   logEvent(ctx.dir, { type: 'submit', step: step.id, by: agent, duration_ms: res.durationMs, cost_usd: res.costUsd });
 }

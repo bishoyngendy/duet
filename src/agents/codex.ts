@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { codexActivity } from '../activity.ts';
 import { exec, exists, readText, tail, writeJson, writeText } from '../util.ts';
 import { resolveAgent, type AgentConfig } from '../config.ts';
 import type { Agent, AgentCall, AgentOutput } from './types.ts';
@@ -22,6 +23,9 @@ export class CodexAgent implements Agent {
       model,
       '-c',
       `model_reasoning_effort="${effort}"`,
+      // Without summaries, codex --json emits no reasoning items and the live view shows no thinking.
+      '-c',
+      'model_reasoning_summary="detailed"',
       '-C',
       call.cwd,
       '-s',
@@ -37,7 +41,12 @@ export class CodexAgent implements Agent {
     ];
     const cmd = this.cfg.command ?? 'codex';
     writeText(join(call.rawDir, `${call.label}.argv.json`), JSON.stringify([cmd, ...args], null, 2));
-    const res = await exec(cmd, args, { cwd: call.cwd, input: call.prompt, timeoutMs: call.timeoutMs, env: childEnv() });
+    const onStdoutLine = (line: string) => {
+      try {
+        for (const a of codexActivity(JSON.parse(line), call.cwd)) call.onActivity?.(a);
+      } catch {}
+    };
+    const res = await exec(cmd, args, { cwd: call.cwd, input: call.prompt, timeoutMs: call.timeoutMs, env: childEnv(), onStdoutLine });
     writeText(join(call.rawDir, `${call.label}.events.jsonl`), res.stdout);
     if (res.stderr) writeText(join(call.rawDir, `${call.label}.stderr.txt`), res.stderr);
     if (res.timedOut) throw new Error(`codex timed out after ${Math.round(call.timeoutMs / 60000)}m`);

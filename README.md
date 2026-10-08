@@ -36,6 +36,21 @@ per feature, in dependency order, on a stacked branch + worktree:
 
 `--depth quick` skips rebuttals and challenge and does one clarify round; `deep` does three.
 
+## Watching Claude and Codex live
+
+Every worker streams what it is doing: thinking, commands, files read or edited, searches. In cmux or tmux, `duetto run`
+opens a Claude pane and a Codex pane beside the orchestrator automatically (`ui.panes`: `auto` | `cmux` | `tmux` |
+`off`). Each pane closes itself when the run finishes. Anywhere else:
+
+```sh
+duetto watch                  # both agents, stacked, live
+duetto watch --agent codex    # follow one agent
+duetto watch --compact        # one line per activity, for pipes
+duetto panes                  # reopen the panes
+```
+
+Transcripts live in `.duetto/runs/<run>/live/{claude,codex}.log`.
+
 ## Install
 
 Requires Node ≥ 20.17, `git`, and the `claude` and `codex` CLIs logged in. Nothing to `npm install`: the engine is

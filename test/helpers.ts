@@ -47,6 +47,7 @@ export class FakeAgent implements Agent {
   }
   async invoke(call: AgentCall): Promise<AgentOutput> {
     this.calls.push(call);
+    call.onActivity?.({ kind: 'message', text: `${this.name} doing ${call.role} work` });
     const out = this.behaviour(call, fakeFromSchema(call.schema));
     return { text: JSON.stringify(out), raw: '' };
   }

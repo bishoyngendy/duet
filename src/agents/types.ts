@@ -1,3 +1,4 @@
+import type { Activity } from '../activity.ts';
 import type { Schema } from '../schema.ts';
 import type { AgentName } from '../schemas.ts';
 
@@ -25,6 +26,8 @@ export type AgentCall = {
   rawDir: string;
   label: string;
   timeoutMs: number;
+  /** Called with each thing the agent does while it runs (thinking, commands, files…), for the live views. */
+  onActivity?: (a: Activity) => void;
 };
 
 export type AgentOutput = { text: string; structured?: unknown; costUsd?: number; raw: string };
