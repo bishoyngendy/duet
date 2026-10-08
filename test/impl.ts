@@ -10,4 +10,5 @@ export const util = await load('util');
 export const schema = await load('schema');
 export const schemas = await load('schemas');
 export const conflict = await load('conflict');
+export const waves = await load('waves');
 export const IMPL = built ? 'built' : 'source';

@@ -8,12 +8,13 @@ import type { Role } from './agents/types.ts';
 import { bounceConflicts } from './conflict.ts';
 import { runChecks, type CheckResult } from './checks.ts';
 import type { Config } from './config.ts';
-import { addWorktree, commitAll, diff, git, head, restore, snapshot, worktreePath } from './git.ts';
+import { addWorktree, commitAll, diff, git, head, removeWorktree, restore, snapshot, worktreePath } from './git.ts';
 import { hostInstructions, workerPrompt } from './prompt.ts';
 import * as render from './render.ts';
 import { SCHEMAS, type AgentName, type Answer, type Feature, type MergedQ, type Task } from './schemas.ts';
 import { logEvent, type RunState } from './state.ts';
-import { appendLine, exists, fmtMs, readJson, readText, sh, tail, topoSort, writeJson, writeText } from './util.ts';
+import { appendLine, exec, exists, fmtMs, readJson, readText, sh, tail, topoSort, writeJson, writeText } from './util.ts';
+import { planWaves } from './waves.ts';
 
 export type Ctx = {
   repo: string;
@@ -61,7 +62,7 @@ async function callAgent(
   agent: AgentName,
   o: { stepId: string; role: Role; prompt: string; cwd: string; writable: boolean; schema: string },
 ): Promise<any> {
-  ctx.print(`    ${agent} ▸ ${o.role}…`);
+  ctx.print(`    ${agent} ▸ ${o.role} (${o.stepId})…`);
   const res = await runAgent(ctx.agents[agent], {
     role: o.role,
     prompt: o.prompt,
@@ -73,7 +74,7 @@ async function callAgent(
     timeoutMs: ctx.config.timeout_minutes * 60_000,
   });
   logEvent(ctx.dir, { type: 'agent', step: o.stepId, agent, role: o.role, duration_ms: res.durationMs, cost_usd: res.costUsd, attempts: res.attempts });
-  ctx.print(`    ${agent} ✓ ${o.role} (${fmtMs(res.durationMs)}${res.costUsd ? `, $${res.costUsd.toFixed(2)}` : ''})`);
+  ctx.print(`    ${agent} ✓ ${o.role} (${o.stepId}, ${fmtMs(res.durationMs)}${res.costUsd ? `, $${res.costUsd.toFixed(2)}` : ''})`);
   return res.output;
 }
 
@@ -225,11 +226,7 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     const specsRoot = join(wt, 'specs');
     const used = existsSync(specsRoot) ? readdirSync(specsRoot).map((n) => Number(n.match(/^(\d{3})-/)?.[1] ?? 0)) : [];
     const number = String(Math.max(0, ...used) + 1).padStart(3, '0');
-    if (ctx.config.checks.setup) {
-      ctx.print(`    setup: ${ctx.config.checks.setup}`);
-      const res = await sh(ctx.config.checks.setup, wt, ctx.config.checks.timeout_minutes * 60_000);
-      if (res.code !== 0) throw new Error(`Setup command failed in ${wt}:\n${tail(res.stdout + res.stderr, 2000)}`);
-    }
+    await runSetup(ctx, wt);
     const meta: FeatureMeta = { id: f.id, title: f.title, slug: f.slug, number, branch, worktree: wt, base: baseSha, specDir: join(specsRoot, `${number}-${f.slug}`) };
     return meta;
   });
@@ -403,9 +400,17 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     return { sha };
   });
 
-  // ── implement: alternate implementer/reviewer per task
+  // ── implement: alternate implementer/reviewer per task; independent tasks run concurrently in waves.
+  // Already-started tasks (a run resumed after upgrading) stay solo in the feature worktree they began in.
+  yield det(`${f.id}/waves`, `${f.id}: schedule tasks`, p('waves.json'), async () => ({
+    waves: planWaves(tasks, ctx.config.parallel_tasks, (t) => exists(join(FD, 'tasks', t.id, 'base.json'))).map((w) => w.map((t) => t.id)),
+  }));
+  const waves = readJson<{ waves: string[][] }>(p('waves.json')).waves.map((ids) => ids.map((id) => tasks.find((t) => t.id === id)!));
   const shared = { ctx, FD, meta, spec: () => readJson(p('spec.json')), plan, tasks };
-  for (const t of tasks) yield* taskLoop(shared, t, assignment[t.id]);
+  for (const [i, wave] of waves.entries()) {
+    if (wave.length === 1) yield* taskLoop(shared, wave[0], assignment[wave[0].id]);
+    else yield* parallelWave(shared, `W${i + 1}`, wave, assignment);
+  }
 
   // ── converge: whole-feature audit by the model that implemented less
   const counts = { claude: 0, codex: 0 };
@@ -429,7 +434,7 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
           writable: false,
           cwd: wt,
           schema: 'Converge',
-          prompt: workerPrompt('converger', ctx.repo, { spec: shared.spec(), plan: plan(), tasks, checks, diff_stat: stat, diff: patch }),
+          prompt: workerPrompt('converger', ctx.repo, { spec: shared.spec(), plan: plan(), tasks, checks: checksForPrompt(checks), diff_stat: stat, diff: patch }),
         });
         writeJson(out, result);
       },
@@ -472,10 +477,11 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
   }
 
   yield det(`${f.id}/report`, `${f.id}: write report`, p('report.json'), async () => {
-    const all = [...tasks.map((t) => t.id), ...readdirSync(join(FD, 'tasks')).filter((n) => n.startsWith('FIX'))];
+    const all = [...tasks.map((t) => t.id), ...readdirSync(join(FD, 'tasks')).filter((n) => n.startsWith('FIX') || n.endsWith('-rerun'))];
     const rows = all.map((id) => {
       const c = readJson(join(FD, 'tasks', id, 'commit.json'));
-      return { id, title: tasks.find((t) => t.id === id)?.title ?? 'Convergence fixes', ...c };
+      const title = tasks.find((t) => t.id === id.replace(/-rerun$/, ''))?.title ?? 'Convergence fixes';
+      return { id, title, ...c, ...mergedSha(FD, id) };
     });
     const lastConv = lastNumbered(FD, 'converge-', '.json', (n) => !n.includes('decision'));
     const lastChecks = lastNumbered(FD, 'final-checks-', '.json');
@@ -490,9 +496,8 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
 
 type Shared = { ctx: Ctx; FD: string; meta: FeatureMeta; spec: () => any; plan: () => any; tasks: Task[] };
 
-function* taskLoop(s: Shared, t: Task, impl: AgentName): Generator<Step> {
+function* taskLoop(s: Shared, t: Task, impl: AgentName, wt = s.meta.worktree): Generator<Step> {
   const { ctx, meta } = s;
-  const wt = meta.worktree;
   const rev = other(impl);
   const TD = join(s.FD, 'tasks', t.id);
   const p = (n: string) => join(TD, n);
@@ -507,6 +512,8 @@ function* taskLoop(s: Shared, t: Task, impl: AgentName): Generator<Step> {
   for (let r = 1; ; r++) {
     const prevReview = r > 1 ? readJson(p(`review-${r - 1}.json`)) : null;
     const prevChecks = r > 1 ? readJson(p(`checks-${r - 1}.json`)) : null;
+    // A polish round follows an approved, passing round: its fixes are gated by checks, not re-reviewed.
+    const polishing = prevReview?.status === 'approved' && Boolean(prevChecks?.passed);
     const guidance = escalationGuidance(TD, escalations);
 
     yield {
@@ -515,6 +522,7 @@ function* taskLoop(s: Shared, t: Task, impl: AgentName): Generator<Step> {
       kind: 'worker',
       done: () => exists(p(`impl-${r}.json`)),
       run: async () => {
+        if (polishing) ctx.print(`    polish: ${rev} approved with ${ctx.config.review.polish.join('/')} findings — one polish round`);
         const out = await callAgent(ctx, impl, {
           stepId: `${id}/r${r}/implement`,
           role: 'implementer',
@@ -530,10 +538,9 @@ function* taskLoop(s: Shared, t: Task, impl: AgentName): Generator<Step> {
               task: t,
               all_tasks: s.tasks.map((x) => ({ id: x.id, title: x.title, depends_on: x.depends_on })),
               review_findings_to_address: prevReview,
-              polish_round:
-                prevReview?.status === 'approved'
-                  ? `${rev} approved your work but raised minor findings. Address each one, or dispute it with reasoning; make no unrelated changes.`
-                  : null,
+              polish_round: polishing
+                ? `${rev} approved your work but raised minor findings. Address each one, or dispute it with reasoning; make no unrelated changes. There is no further review: the project's checks must still pass.`
+                : null,
               failing_checks: prevChecks && !prevChecks.passed ? summarizeChecks(prevChecks) : null,
               user_guidance: guidance.length ? guidance : null,
             },
@@ -549,6 +556,7 @@ function* taskLoop(s: Shared, t: Task, impl: AgentName): Generator<Step> {
       ctx.print(`    checks: ${res.passed ? 'passed' : 'FAILED'} (${res.commands.map((c) => `${c.cmd}=${c.exit_code}`).join(', ') || 'no commands configured'})`);
       return res;
     });
+    if (polishing && readJson<CheckResult>(p(`checks-${r}.json`)).passed) break;
 
     yield {
       id: `${id}/r${r}/review`,
@@ -572,7 +580,7 @@ function* taskLoop(s: Shared, t: Task, impl: AgentName): Generator<Step> {
               plan: s.plan(),
               task: t,
               implementation_report: readJson(p(`impl-${r}.json`)),
-              checks: readJson(p(`checks-${r}.json`)),
+              checks: checksForPrompt(readJson(p(`checks-${r}.json`))),
               previous_review: prevReview,
               diff_stat: stat,
               diff: patch,
@@ -599,7 +607,6 @@ function* taskLoop(s: Shared, t: Task, impl: AgentName): Generator<Step> {
       // so findings both models agree are worth fixing don't silently ship.
       const polishUsed = countPolishRounds(TD, r - 1, ctx.config.review.polish);
       if (!hasPolishFindings(review, ctx.config.review.polish) || polishUsed >= ctx.config.review.polish_rounds) break;
-      ctx.print(`    polish: ${rev} approved with ${ctx.config.review.polish.join('/')} findings — one polish round`);
       limit = Math.max(limit, r + 1);
       continue;
     }
@@ -643,6 +650,111 @@ function* taskLoop(s: Shared, t: Task, impl: AgentName): Generator<Step> {
     );
     return { sha, implementer: impl, reviewer: rev, rounds, accepted_with_issues: accepted };
   });
+}
+
+// ───────────────────────────── parallel waves ─────────────────────────────
+
+/**
+ * Independent tasks, each in its own worktree branched from the feature head: one step drives all their
+ * implement/review loops concurrently until each is committed or waiting on a gate; gates follow one at a time.
+ * Then each task's commit is cherry-picked onto the feature branch in order; a conflicting task is redone serially.
+ */
+function* parallelWave(s: Shared, wid: string, wave: Task[], assignment: Record<string, AgentName>): Generator<Step> {
+  const { ctx, meta } = s;
+  const WD = join(s.FD, 'waves', wid);
+  const id = `${meta.id}/${wid}`;
+  const names = wave.map((t) => t.id).join(' ∥ ');
+  const taskWt = (t: Task) => worktreePath(ctx.repo, ctx.config.worktrees_dir, ctx.state.id, `${meta.id}-${t.id}`);
+  const taskBranch = (t: Task) => `duet/${ctx.state.id}/${meta.id}-${t.id}`;
+
+  yield det(`${id}/setup`, `${id}: worktrees for ${names}`, join(WD, 'setup.json'), async () => {
+    const base = await head(meta.worktree);
+    await Promise.all(
+      wave.map(async (t) => {
+        if (!existsSync(taskWt(t))) await addWorktree(ctx.repo, taskWt(t), taskBranch(t), base);
+        await runSetup(ctx, taskWt(t));
+      }),
+    );
+    return { base };
+  });
+
+  const pending = (t: Task) => firstPending(taskLoop(s, t, assignment[t.id], taskWt(t)));
+  const runnable = (st: Step | null) => st !== null && st.kind !== 'user';
+  yield {
+    id: `${id}/tasks`,
+    title: `${meta.id}: tasks ${names} in parallel`,
+    kind: 'worker',
+    done: () => !wave.some((t) => runnable(pending(t))),
+    run: async () => {
+      const results = await Promise.allSettled(
+        wave.map(async (t) => {
+          for (let st = pending(t); st && runnable(st); st = pending(t)) {
+            ctx.print(`▶ ${st.title}`);
+            logEvent(ctx.dir, { type: 'step_start', step: st.id });
+            await st.run!();
+            if (!st.done()) throw new Error(`Step ${st.id} finished without producing its output`);
+            logEvent(ctx.dir, { type: 'step_done', step: st.id });
+          }
+        }),
+      );
+      const failed = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+      if (failed.length) throw new Error(failed.map((f) => (f.reason as Error).message).join('\n'));
+    },
+  };
+  for (const t of wave) {
+    const gateStep = pending(t);
+    if (gateStep) yield gateStep;
+  }
+
+  yield det(`${id}/merge`, `${id}: merge ${names} into ${meta.branch}`, join(WD, 'merge.json'), async () => {
+    const merged: Record<string, { status: 'merged' | 'empty' | 'conflict'; sha?: string; detail?: string }> = {};
+    for (const t of wave) {
+      // Per-task marks make the merge resumable without cherry-picking anything twice.
+      const mark = join(WD, `merge-${t.id}.json`);
+      if (!exists(mark)) writeJson(mark, await cherryPick(meta.worktree, readJson(join(s.FD, 'tasks', t.id, 'commit.json')).sha));
+      merged[t.id] = readJson(mark);
+      if (merged[t.id].status === 'conflict') ctx.print(`    ${t.id} conflicts with the merged work — it will be redone on top of it`);
+      else await removeWorktree(ctx.repo, taskWt(t), taskBranch(t));
+    }
+    return merged;
+  });
+  const merged = readJson(join(WD, 'merge.json'));
+  for (const t of wave) {
+    if (merged[t.id].status !== 'conflict') continue;
+    const redo = { ...t, id: `${t.id}-rerun`, description: `${t.description}\n\n(Redo: ${t.id} was implemented in parallel with other tasks but conflicted when merged. Implement it again on top of the merged work.)` };
+    yield* taskLoop(s, redo, assignment[t.id]);
+  }
+}
+
+async function cherryPick(wt: string, sha: string | null) {
+  if (!sha) return { status: 'empty' as const };
+  const res = await exec('git', ['cherry-pick', sha], { cwd: wt });
+  if (res.code === 0) return { status: 'merged' as const, sha: await head(wt) };
+  await exec('git', ['cherry-pick', '--abort'], { cwd: wt });
+  return { status: 'conflict' as const, detail: tail(res.stdout + res.stderr, 1500) };
+}
+
+/** A task merged from a parallel wave lives on the feature branch under a new sha. */
+function mergedSha(FD: string, taskId: string): { sha?: string } {
+  const wavesDir = join(FD, 'waves');
+  if (!existsSync(wavesDir)) return {};
+  for (const w of readdirSync(wavesDir)) {
+    const mark = join(wavesDir, w, `merge-${taskId}.json`);
+    if (exists(mark) && readJson(mark).status === 'merged') return { sha: readJson(mark).sha };
+  }
+  return {};
+}
+
+function firstPending(steps: Generator<Step>): Step | null {
+  for (const st of steps) if (!st.done()) return st;
+  return null;
+}
+
+async function runSetup(ctx: Ctx, wt: string) {
+  if (!ctx.config.checks.setup) return;
+  ctx.print(`    setup: ${ctx.config.checks.setup} (${wt})`);
+  const res = await sh(ctx.config.checks.setup, wt, ctx.config.checks.timeout_minutes * 60_000);
+  if (res.code !== 0) throw new Error(`Setup command failed in ${wt}:\n${tail(res.stdout + res.stderr, 2000)}`);
 }
 
 // ───────────────────────────── decision blocks ─────────────────────────────
@@ -772,6 +884,11 @@ function summarizeChecks(c: CheckResult) {
   };
 }
 
+/** Checks as agents see them: passing commands are just a name and exit code, failing ones keep their output. */
+function checksForPrompt(c: CheckResult) {
+  return { ...c, commands: c.commands.map((x) => (x.exit_code === 0 ? { cmd: x.cmd, exit_code: 0 } : x)) };
+}
+
 function hasPolishFindings(review: any, severities: string[]): boolean {
   return review.status === 'approved' && review.findings.some((f: any) => severities.includes(f.severity));
 }
@@ -787,7 +904,7 @@ function countPolishRounds(TD: string, upTo: number, severities: string[]): numb
 }
 
 function countRounds(TD: string): number {
-  return existsSync(TD) ? readdirSync(TD).filter((n) => /^review-\d+\.json$/.test(n)).length : 0;
+  return existsSync(TD) ? readdirSync(TD).filter((n) => /^impl-\d+\.json$/.test(n)).length : 0;
 }
 
 function lastNumbered(dir: string, prefix: string, suffix: string, filter: (n: string) => boolean = () => true): string | null {

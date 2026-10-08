@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { engine, util } from './impl.ts';
@@ -247,9 +247,27 @@ test('approved review with low findings triggers exactly one polish round', asyn
   const FD = join(ctx.dir, 'features', 'F1');
   assert.equal(readJson(join(FD, 'tasks', 'T001', 'commit.json')).rounds, 2, 'one polish round, then stop');
   assert.equal(readJson(join(FD, 'tasks', 'T002', 'commit.json')).rounds, 1);
+  assert.ok(!existsSync(join(FD, 'tasks', 'T001', 'review-2.json')), 'polish fixes are not re-reviewed');
   const polishPrompt = claude.calls.find((c) => c.label.includes('T001__r2__implement'))!.prompt;
   assert.match(polishPrompt, /polish_round/);
   assert.match(polishPrompt, /approved your work but raised minor findings/);
+});
+
+test('a polish round whose checks fail goes back to review', async () => {
+  const repo = gitRepo();
+  const low = { id: 'L1', severity: 'low', file: null, line: null, issue: 'i', required_change: 'c' };
+  const reviewer = (call: any, base: any) => {
+    implementerWrites(call, base);
+    if (call.role === 'reviewer' && call.label.includes('T001')) return { ...base, status: 'approved', findings: call.label.includes('r1') ? [low] : [] };
+    return base;
+  };
+  // The polish implementation (T001 round 2) breaks the checks.
+  const checks = { setup: null, commands: ['! ls src | grep -q T001__r2__implement'], timeout_minutes: 1 };
+  const ctx = makeRun(repo, { claude: new FakeAgent('claude', reviewer), codex: new FakeAgent('codex', reviewer) }, { depth: 'quick', config: { checks } });
+  await drive(ctx, hostScript, withConflict((step) => (step.gate!.questions[0].id === 'REVIEW' ? { REVIEW: 'accept' } : 'suggested')));
+  const TD = join(ctx.dir, 'features', 'F1', 'tasks', 'T001');
+  assert.equal(readJson(join(TD, 'checks-2.json')).passed, false);
+  assert.ok(existsSync(join(TD, 'review-2.json')), 'failing polish round is reviewed');
 });
 
 test('polish can be disabled', async () => {
@@ -262,4 +280,60 @@ test('polish can be disabled', async () => {
   const ctx = makeRun(repo, { claude: new FakeAgent('claude', reviewer), codex: new FakeAgent('codex', reviewer) }, { depth: 'quick', config: { review: { blocking: ['critical', 'high', 'medium'], polish: ['low'], polish_rounds: 0 } } });
   await drive(ctx, hostScript, withConflict(() => 'suggested'));
   assert.equal(readJson(join(ctx.dir, 'features', 'F1', 'tasks', 'T001', 'commit.json')).rounds, 1);
+});
+
+const parallelTasks = [
+  { id: 'T001', title: 'Left', description: 'd', depends_on: [], files_in_scope: ['src/a/**'], acceptance: ['a'], test_command: null },
+  { id: 'T002', title: 'Right', description: 'd', depends_on: [], files_in_scope: ['src/b/**'], acceptance: ['a'], test_command: null },
+  { id: 'T003', title: 'Join', description: 'd', depends_on: ['T001', 'T002'], files_in_scope: ['src/**'], acceptance: ['a'], test_command: null },
+];
+const parallelHost: HostScript = (step, base) => (step.host!.schema === 'Tasks' ? { tasks: parallelTasks } : hostScript(step, base));
+
+test('independent tasks run in parallel worktrees and are merged onto the feature branch in order', async () => {
+  const repo = gitRepo();
+  const claude = new FakeAgent('claude', implementerWrites);
+  const codex = new FakeAgent('codex', implementerWrites);
+  const ctx = makeRun(repo, { claude, codex }, { depth: 'quick' });
+  const visited = await drive(ctx, parallelHost, withConflict(() => 'suggested'));
+  assert.equal(ctx.state.status, 'done');
+  const FD = join(ctx.dir, 'features', 'F1');
+  assert.deepEqual(readJson(join(FD, 'waves.json')).waves, [['T001', 'T002'], ['T003']]);
+  assert.ok(!visited.some((v) => v.includes('W1')), 'the wave needed no host or user input');
+
+  const meta = readJson(join(FD, 'feature.json'));
+  const implCwd = (agent: FakeAgent, task: string) => agent.calls.find((c) => c.label.includes(`${task}__r1__implement`))!.cwd;
+  assert.notEqual(implCwd(claude, 'T001'), meta.worktree, 'T001 ran in its own worktree');
+  assert.notEqual(implCwd(codex, 'T002'), implCwd(claude, 'T001'));
+  assert.equal(implCwd(claude, 'T003'), meta.worktree, 'single-task wave runs in the feature worktree');
+  assert.ok(!existsSync(implCwd(claude, 'T001')), 'task worktree removed after merge');
+
+  const log = git(meta.worktree, 'log', '--format=%s');
+  assert.match(log, /feat\(001\/T003\): Join\n.*feat\(001\/T002\): Right\n.*feat\(001\/T001\): Left/s);
+  // T003 builds on both merged tasks: their files are present in its base.
+  const t3base = readJson(join(FD, 'tasks', 'T003', 'base.json')).base;
+  assert.match(git(meta.worktree, 'ls-tree', '-r', '--name-only', t3base), /F1__T001__r1__implement.*\n.*F1__T002__r1__implement/s);
+  assert.equal(git(meta.worktree, 'status', '--porcelain'), '');
+  assert.match(readJson(join(FD, 'waves', 'W1', 'merge.json')).T002.status, /merged/);
+});
+
+test('a parallel task that conflicts on merge is redone on top of the merged work', async () => {
+  const repo = gitRepo();
+  // Both tasks also touch the same out-of-scope file, so the second cherry-pick conflicts.
+  const sharedWriter = (call: any, base: any) => {
+    implementerWrites(call, base);
+    if (call.role === 'implementer') writeFileSync(join(call.cwd, 'src', 'index.ts'), `export const x = '${call.label}';\n`);
+    return base;
+  };
+  const ctx = makeRun(repo, { claude: new FakeAgent('claude', sharedWriter), codex: new FakeAgent('codex', sharedWriter) }, { depth: 'quick' });
+  await drive(ctx, parallelHost, withConflict(() => 'suggested'));
+  assert.equal(ctx.state.status, 'done');
+  const FD = join(ctx.dir, 'features', 'F1');
+  const merged = readJson(join(FD, 'waves', 'W1', 'merge.json'));
+  assert.equal(merged.T001.status, 'merged');
+  assert.equal(merged.T002.status, 'conflict');
+  const meta = readJson(join(FD, 'feature.json'));
+  assert.equal(readJson(join(FD, 'tasks', 'T002-rerun', 'base.json')).implementer, 'codex');
+  assert.match(git(meta.worktree, 'log', '--format=%s'), /feat\(001\/T002-rerun\): Right/);
+  assert.equal(git(meta.worktree, 'status', '--porcelain'), '', 'no cherry-pick left in progress');
+  assert.match(readFileSync(join(meta.specDir, 'report.md'), 'utf8'), /T002-rerun/);
 });

@@ -25,6 +25,8 @@ export function resolveAgent(cfg             , role        )                    
                                                                                        
                                   
                                
+                                                                                                                              
+                         
                             
            
                                                                                           
@@ -46,11 +48,17 @@ export function resolveAgent(cfg             , role        )                    
 export const DEFAULT_CONFIG         = {
   agents: {
     claude: { model: 'claude-opus-5-5', effort: 'high', roles: { scanner: { effort: 'medium' }, questioner: { effort: 'medium' } } },
-    codex: { model: 'gpt-6.1-sol', effort: 'high', roles: { scanner: { effort: 'medium' }, questioner: { effort: 'medium' } } },
+    // Codex is the slower model on every parallel step; analysis roles run at medium so it stops gating them.
+    codex: {
+      model: 'gpt-6.1-sol',
+      effort: 'high',
+      roles: Object.fromEntries(['scanner', 'questioner', 'researcher', 'rebutter', 'challenger', 'reviewer'].map((r) => [r, { effort: 'medium' }])),
+    },
   },
   depth: 'standard',
   synthesizer_fallback: 'claude',
   first_implementer: 'claude',
+  parallel_tasks: 3,
   max_review_rounds: 3,
   review: { blocking: ['critical', 'high', 'medium'], polish: ['low'], polish_rounds: 1 },
   max_clarify_rounds: { quick: 1, standard: 2, deep: 3 },

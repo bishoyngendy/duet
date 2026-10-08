@@ -57,34 +57,79 @@ export function fmtMs(ms        )         {
 
                                                                                                                  
 
+/** Process groups of children still running, so they can be torn down if the engine itself is stopped. */
+const liveGroups = new Set        ();
+
+function killGroup(pid        , signal                )       {
+  try {
+    process.kill(-pid, signal);
+  } catch {}
+}
+
+let signalsHooked = false;
+function hookSignals()       {
+  if (signalsHooked) return;
+  signalsHooked = true;
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']         ) {
+    process.once(sig, () => {
+      for (const pid of liveGroups) killGroup(pid, 'SIGKILL');
+      process.kill(process.pid, sig);
+    });
+  }
+}
+
+/** After the child exits, how long to wait for grandchildren that inherited its stdio to let go of the pipes. */
+const DRAIN_MS = 2000;
+
 export function exec(
   cmd        ,
   args          ,
   opts                                                                               = { cwd: process.cwd() },
 )                      {
   const started = Date.now();
+  hookSignals();
   return new Promise((resolve, reject) => {
     const piped = opts.input !== undefined;
-    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: [piped ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+    // Own process group: a timeout kills the whole tree (test runners, build daemons), not just the CLI.
+    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: [piped ? 'pipe' : 'ignore', 'pipe', 'pipe'], detached: true });
+    const pid = child.pid;
+    if (pid) liveGroups.add(pid);
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let settled = false;
+    const finish = (code               ) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (pid) liveGroups.delete(pid);
+      resolve({ code: code ?? -1, stdout, stderr, timedOut, durationMs: Date.now() - started });
+    };
     const timer = opts.timeoutMs
       ? setTimeout(() => {
           timedOut = true;
-          child.kill('SIGTERM');
-          setTimeout(() => child.kill('SIGKILL'), 5000).unref();
+          if (pid) killGroup(pid, 'SIGTERM');
+          setTimeout(() => pid && killGroup(pid, 'SIGKILL'), 5000).unref();
         }, opts.timeoutMs)
       : undefined;
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', (d) => (stderr += d));
     child.on('error', (err) => {
       clearTimeout(timer);
+      if (pid) liveGroups.delete(pid);
+      settled = true;
       reject(err);
     });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? -1, stdout, stderr, timedOut, durationMs: Date.now() - started });
+    child.on('close', (code) => finish(code));
+    // 'close' waits for every holder of the stdio pipes; a leftover grandchild would make it wait forever.
+    child.on('exit', (code) => {
+      setTimeout(() => {
+        if (settled) return;
+        child.stdout.destroy();
+        child.stderr.destroy();
+        if (pid) killGroup(pid, 'SIGKILL');
+        finish(code);
+      }, DRAIN_MS).unref();
     });
     if (child.stdin) {
       // A child may exit without reading its input (e.g. a fast failure); that EPIPE is not our error.
