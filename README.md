@@ -20,6 +20,7 @@ duetto specify "add checkpoint reminders"   # research + spec draft → specs/NN
 duetto clarify                              # both models question the draft; your answers revise the spec
 duetto plan                                 # independent plans, rebuttal, synthesis, adversarial challenge
 duetto tasks                                # Spec Kit tasks.md; [P] tasks are implemented concurrently
+duetto analyze                              # optional: both models audit spec/plan/tasks → analysis.md
 duetto implement                            # alternating implement → checks → cross-review per task
 duetto converge                             # whole-feature audit against the spec, then report.md
 ```
@@ -51,7 +52,7 @@ per feature, in dependency order, on a stacked branch + worktree:
   converge audit → ⛔ fix/accept → report.md
 ```
 
-`--depth quick` skips rebuttals and challenge and does one clarify round; `deep` does three.
+`--depth quick` skips rebuttals and challenge and does one clarify round; `deep` does three and always runs `analyze`.
 
 ## Spec Kit
 

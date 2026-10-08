@@ -9,6 +9,7 @@ export type Role =
   | 'questioner'
   | 'planner'
   | 'challenger'
+  | 'analyzer'
   | 'implementer'
   | 'reviewer'
   | 'converger'

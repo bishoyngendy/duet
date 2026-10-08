@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -108,6 +108,7 @@ export async function main(argv: string[]): Promise<number> {
       const entry = resolveFeature(repo, { flag: v.feature, branch: await currentBranch(repo).catch(() => undefined) });
       setCurrentRun(repo, entry.run);
       console.log(`${entry.spec_dir} (run ${entry.run}, ${entry.feature}) → ${cmd}`);
+      if (cmd === 'analyze') requestAnalysis(runDir(repo, entry.run), entry.feature);
       return go(await context(entry.run), { phase: cmd, feature: entry.feature }, v);
     }
     case 'start': {
@@ -200,6 +201,18 @@ const exitFor = (s: RunState['status']) => (s === 'failed' ? 1 : 0);
  * Starts `duetto run` as its own process group with output to live/runner.log, and returns at once. The run
  * then survives the shell or session that started it; `duetto watch --milestones` follows it.
  */
+/** `duetto analyze` always analyzes afresh (like /speckit-analyze): earlier results are moved aside. */
+function requestAnalysis(dir: string, feature: string) {
+  const FD = join(dir, 'features', feature);
+  const old = ['analysis.claude.json', 'analysis.codex.json', 'analysis.json'].filter((n) => exists(join(FD, n)));
+  if (old.length) {
+    const keep = join(FD, 'superseded', `analysis-${Date.now()}`);
+    mkdirSync(keep, { recursive: true });
+    for (const n of old) renameSync(join(FD, n), join(keep, n));
+  }
+  writeText(join(FD, 'analyze.requested'), new Date().toISOString() + '\n');
+}
+
 /** Advance (or detach) a run up to a phase; the target is remembered for later `duetto run`s. */
 async function go(ctx: Ctx, until: Until, v: { headless?: boolean; detach?: boolean }): Promise<number> {
   ctx.state.until = until;

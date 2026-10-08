@@ -240,6 +240,31 @@ export function renderTasks(t     , o                                           
   return out.join('\n\n');
 }
 
+/** analysis.md in the shape of Spec Kit's analyze report. */
+export function renderAnalysis(a     )         {
+  const covered = a.coverage.filter((c     ) => c.tasks.length).length;
+  const count = (sev        ) => a.findings.filter((f     ) => f.severity === sev).length;
+  return [
+    '# Specification Analysis Report',
+    '_Claude ∥ Codex audit of spec.md, plan.md and tasks.md before implementation._',
+    a.findings.length
+      ? '| ID | Category | Severity | Location | Summary | Recommendation | Found by |\n|---|---|---|---|---|---|---|\n' +
+        a.findings.map((f     ) => `| ${f.id} | ${f.category} | ${f.severity.toUpperCase()} | ${f.location} | ${f.summary} | ${f.recommendation} | ${f.found_by} |`).join('\n')
+      : '_No issues found._',
+    '## Coverage Summary',
+    a.coverage.length
+      ? '| Requirement | Has task? | Tasks | Notes |\n|---|---|---|---|\n' + a.coverage.map((c     ) => `| ${c.requirement} | ${c.tasks.length ? '✅' : '❌'} | ${c.tasks.join(', ')} | ${c.note} |`).join('\n')
+      : '_No requirements mapped._',
+    ...(a.unmapped_tasks.length ? ['## Unmapped Tasks', list(a.unmapped_tasks)] : []),
+    '## Metrics',
+    list([
+      `Requirements: ${a.coverage.length}`,
+      `Coverage: ${a.coverage.length ? Math.round((100 * covered) / a.coverage.length) : 100}% (${covered}/${a.coverage.length} with ≥1 task)`,
+      `Critical: ${count('critical')} · High: ${count('high')} · Medium: ${count('medium')} · Low: ${count('low')}`,
+    ]),
+  ].join('\n\n');
+}
+
 export function renderDecisions(entries                                                       )         {
   const out = ['# Decisions'];
   for (const e of entries) {

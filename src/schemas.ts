@@ -112,6 +112,17 @@ const Conflict = obj({
   options: arr(Option, 'Choices to offer the user if it needs a decision'),
 });
 
+const ANALYSIS_CATEGORIES = ['duplication', 'ambiguity', 'underspecification', 'constitution', 'coverage', 'inconsistency'] as const;
+const AnalysisFinding = {
+  id: str('"A1", …'),
+  category: enm(ANALYSIS_CATEGORIES),
+  severity: enm(['critical', 'high', 'medium', 'low']),
+  location: str('e.g. "spec.md FR-003", "tasks T004"'),
+  summary: str(),
+  recommendation: str(),
+};
+const Coverage = arr(obj({ requirement: str('FR-001 / AC-001 / SC-001 / NFR-001'), tasks: strs('Task ids covering it; empty = gap'), note: str() }));
+
 const Rebuttal = obj({
   agreements: strs('Points from the other model you agree with'),
   disagreements: arr(obj({ point: str(), other_position: str(), my_position: str(), reasoning: str() })),
@@ -242,6 +253,14 @@ export const SCHEMAS: Record<string, Schema> = {
         test_command: nstr('Command that verifies this task, or null to use project checks'),
       }),
     ),
+  }),
+
+  Analysis: obj({ findings: arr(obj(AnalysisFinding)), coverage: Coverage, unmapped_tasks: strs('Tasks that map to no requirement') }),
+
+  AnalysisSynthesis: obj({
+    findings: arr(obj({ ...AnalysisFinding, found_by: enm(['claude', 'codex', 'both']) })),
+    coverage: Coverage,
+    unmapped_tasks: strs(),
   }),
 
   Implementation: obj({

@@ -511,6 +511,33 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     return { sha };
   });
 
+  // ── analyze (Spec Kit's /analyze, both models): on request (`duetto analyze`), or at deep depth for runs that
+  // hadn't started implementing when this phase was introduced
+  const autoAnalyze = depth === 'deep' && (exists(p('analysis.json')) || !existsSync(join(FD, 'tasks')));
+  if (autoAnalyze || exists(p('analyze.requested'))) {
+    const docsInput = () => ({ spec: readJson(specPath), plan: plan(), tasks: readJson(p('tasks.json')).tasks });
+    yield both(ctx, {
+      id: `${f.id}/analyze`,
+      title: `${f.id}: analyze spec, plan and tasks (Claude ∥ Codex)`,
+      role: 'analyzer',
+      schema: 'Analysis',
+      cwd: wt,
+      out: (a) => p(`analysis.${a}.json`),
+      prompt: () => workerPrompt('analyzer', ctx.repo, docsInput()),
+    });
+    yield host(`${f.id}/analyze-synthesis`, `${f.id}: merge the analyses`, {
+      instructions: hostInstructions('analyze'),
+      inputs: { analysis_claude: p('analysis.claude.json'), analysis_codex: p('analysis.codex.json'), spec: specPath, plan: finalPlan, tasks: p('tasks.json') },
+      schema: 'AnalysisSynthesis',
+      output: p('analysis.json'),
+      after: (d) => {
+        md('analysis.md', render.renderAnalysis(d));
+        const serious = d.findings.filter((x: any) => x.severity === 'critical' || x.severity === 'high');
+        if (serious.length) ctx.print(`    analysis: ${serious.length} critical/high finding(s) — see analysis.md; implementers will be told about them`);
+      },
+    });
+  }
+
   // ── implement: alternate implementer/reviewer per task
   const waves = readJson<{ waves: string[][] }>(p('waves.json')).waves.map((ids) => ids.map((id) => tasks.find((t) => t.id === id)!));
   const shared = { ctx, FD, meta, spec: () => readJson(specPath), plan, tasks, assignment };
@@ -650,6 +677,7 @@ function* taskLoop(s: Shared, t: Task, impl: AgentName, wt = s.meta.worktree): G
                 : null,
               failing_checks: prevChecks && !prevChecks.passed ? summarizeChecks(prevChecks) : null,
               user_guidance: guidance.length ? guidance : null,
+              analysis_findings: seriousAnalysis(s.FD),
             },
             `You are ${impl}. Round ${r}. ${rev} will review your work.`,
           ),
@@ -997,6 +1025,14 @@ function summarizeChecks(c: CheckResult) {
 /** Checks as agents see them: passing commands are just a name and exit code, failing ones keep their output. */
 function checksForPrompt(c: CheckResult) {
   return { ...c, commands: c.commands.map((x) => (x.exit_code === 0 ? { cmd: x.cmd, exit_code: 0 } : x)) };
+}
+
+/** Critical/high findings of the pre-implementation analysis, if one ran: every implementer should respect them. */
+function seriousAnalysis(FD: string) {
+  const path = join(FD, 'analysis.json');
+  if (!exists(path)) return null;
+  const serious = readJson(path).findings.filter((x: any) => x.severity === 'critical' || x.severity === 'high');
+  return serious.length ? serious : null;
 }
 
 function hasPolishFindings(review: any, severities: string[]): boolean {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { engine, util } from './impl.ts';
@@ -387,4 +387,44 @@ test("a finished feature's specs/ dir is in Spec Kit's format, with every task t
   assert.equal(git(meta.worktree, 'status', '--porcelain'), '', 'ticks are committed');
   assert.match(git(meta.worktree, 'show', '--stat', '--format=', 'HEAD~1'), /tasks\.md/, 'the last task commit carries its tick');
   assert.ok(visited.length);
+});
+
+test('analyze: both models audit spec/plan/tasks, the host merges a Spec Kit-style report, implementers see serious findings', async () => {
+  const repo = gitRepo();
+  const finding = { id: 'A1', category: 'coverage', severity: 'high', location: 'spec.md FR-001', summary: 'FR-001 has no task', recommendation: 'add a task' };
+  const host: HostScript = (step, base) =>
+    step.host!.schema === 'AnalysisSynthesis' ? { findings: [{ ...finding, found_by: 'both' }], coverage: [{ requirement: 'FR-001', tasks: [], note: 'gap' }], unmapped_tasks: [] } : hostScript(step, base);
+  const claude = new FakeAgent('claude', implementerWrites);
+  const ctx = makeRun(repo, { claude, codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'tasks' });
+  const FD = join(ctx.dir, 'features', 'F1');
+  assert.ok(!existsSync(join(FD, 'analysis.claude.json')), 'quick depth does not analyze unasked');
+  writeFileSync(join(FD, 'analyze.requested'), 'now\n');
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'analyze' });
+  assert.equal(ctx.state.status, 'paused');
+  const analyzers = claude.calls.filter((c) => c.role === 'analyzer');
+  assert.equal(analyzers.length, 1);
+  assert.equal(analyzers[0].writable, false);
+  const meta = readJson(join(FD, 'feature.json'));
+  const report = readFileSync(join(meta.specDir, 'analysis.md'), 'utf8');
+  assert.match(report, /^# Specification Analysis Report/);
+  assert.match(report, /\| A1 \| coverage \| HIGH \| spec\.md FR-001 \| FR-001 has no task \| add a task \| both \|/);
+  assert.match(report, /Coverage: 0% \(0\/1 with ≥1 task\)/);
+  await drive(ctx, host, withConflict(() => 'suggested'), 200, { phase: 'converge' });
+  const impl = claude.calls.find((c) => c.role === 'implementer')!;
+  assert.match(impl.prompt, /<input name="analysis_findings">[\s\S]*FR-001 has no task/);
+});
+
+test('deep runs analyze automatically, but not runs that were already implementing', async () => {
+  const deep = makeRun(gitRepo(), { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'deep' });
+  const host: HostScript = (step, base) => (step.host!.schema === 'MergedQuestions' ? { questions: [] } : hostScript(step, base));
+  await drive(deep, host, withConflict(() => 'suggested'));
+  assert.ok(existsSync(join(deep.dir, 'features', 'F1', 'analysis.json')));
+  assert.ok(locate(deep).done.some((s: any) => s.id === 'F1/analyze'));
+
+  const legacy = makeRun(gitRepo(), { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'deep' });
+  await drive(legacy, host, withConflict(() => 'suggested'), 200, { phase: 'tasks' });
+  mkdirSync(join(legacy.dir, 'features', 'F1', 'tasks', 'T001'), { recursive: true }); // implementation had begun
+  await drive(legacy, host, withConflict(() => 'suggested'), 200, { phase: 'converge' });
+  assert.ok(!existsSync(join(legacy.dir, 'features', 'F1', 'analysis.json')));
 });
