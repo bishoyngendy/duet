@@ -337,3 +337,36 @@ test('a parallel task that conflicts on merge is redone on top of the merged wor
   assert.equal(git(meta.worktree, 'status', '--porcelain'), '', 'no cherry-pick left in progress');
   assert.match(readFileSync(join(meta.specDir, 'report.md'), 'utf8'), /T002-rerun/);
 });
+
+test('steps run in Spec Kit phase order: specify → clarify (against the draft) → plan → tasks → implement → converge', async () => {
+  const repo = gitRepo();
+  const claude = new FakeAgent('claude', implementerWrites);
+  const ctx = makeRun(repo, { claude, codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  await drive(ctx, hostScript, withConflict(() => 'suggested'));
+  const { done } = locate(ctx);
+  const order = ['scan', 'decompose', 'specify', 'clarify', 'plan', 'tasks', 'analyze', 'implement', 'converge'];
+  const ranks = done.map((s: any) => order.indexOf(s.phase));
+  assert.ok(ranks.every((r: number, i: number) => r >= 0 && (i === 0 || r >= ranks[i - 1])), done.map((s: any) => `${s.id}:${s.phase}`).join(' '));
+  assert.ok(done.some((s: any) => s.id === 'F1/specify-revise'), 'answers were folded into the spec');
+  const ids = done.map((s: any) => s.id);
+  assert.ok(ids.indexOf('F1/specify') < ids.indexOf('F1/clarify-1'));
+  const questioner = claude.calls.find((c) => c.role === 'questioner')!;
+  assert.match(questioner.prompt, /<input name="spec_draft">/);
+  const FD = join(ctx.dir, 'features', 'F1');
+  assert.ok(existsSync(join(FD, 'spec-final.json')));
+  const planPrompt = claude.calls.find((c) => c.role === 'planner')!.prompt;
+  assert.ok(planPrompt.includes(JSON.stringify(readJson(join(FD, 'spec-final.json')), null, 2)), 'the plan is made from the revised spec');
+});
+
+test('--until pauses after a phase and a later run continues', async () => {
+  const repo = gitRepo();
+  const ctx = makeRun(repo, { claude: new FakeAgent('claude', implementerWrites), codex: new FakeAgent('codex', implementerWrites) }, { depth: 'quick' });
+  await drive(ctx, hostScript, withConflict(() => 'suggested'), 200, { phase: 'plan' });
+  assert.equal(ctx.state.status, 'paused');
+  const FD = join(ctx.dir, 'features', 'F1');
+  assert.ok(existsSync(join(FD, 'plan.json')), 'plan phase finished');
+  assert.ok(!existsSync(join(FD, 'tasks.json')), 'tasks phase not started');
+  assert.match(ctx.state.message, /Reached the end of plan\. Next: F1: break plan into tasks/);
+  await drive(ctx, hostScript, withConflict(() => 'suggested'));
+  assert.equal(ctx.state.status, 'done');
+});

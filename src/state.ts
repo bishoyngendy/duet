@@ -4,7 +4,7 @@ import { appendLine, exists, readJson, readText, slugify, writeJson, writeText }
 import type { Depth } from './config.ts';
 
 /** 'interrupted' is never stored: it is what a stored 'running' reads as once the runner process is gone. */
-export type RunStatus = 'running' | 'interrupted' | 'idle' | 'needs_synthesis' | 'needs_answers' | 'done' | 'failed';
+export type RunStatus = 'running' | 'interrupted' | 'idle' | 'paused' | 'needs_synthesis' | 'needs_answers' | 'done' | 'failed';
 
 export type RunState = {
   id: string;

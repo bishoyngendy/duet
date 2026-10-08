@@ -43,10 +43,17 @@ export type Gate = {
   after?: (answers: Answer[]) => void | Promise<void>;
 };
 
+/** Spec Kit's phases, in pipeline order; `duetto <phase>` runs a feature up to the end of one. */
+export const PHASES = ['scan', 'decompose', 'specify', 'clarify', 'plan', 'tasks', 'analyze', 'implement', 'converge'] as const;
+export type Phase = (typeof PHASES)[number];
+
 export type Step = {
   id: string;
   title: string;
   kind: 'worker' | 'deterministic' | 'host' | 'user';
+  /** Set by pipeline() from the step id (see phaseOf). */
+  phase?: Phase;
+  feature?: string;
   done: () => boolean;
   run?: () => Promise<void>;
   host?: HostTask;
@@ -141,7 +148,30 @@ const choiceOf = (path: string, qid: string): string => (readJson(path).answers 
 
 // ───────────────────────────── pipeline ─────────────────────────────
 
+/** The phase a step belongs to, from its id. One table, so a new step can't silently fall outside every phase. */
+export function phaseOf(id: string): { phase: Phase; feature?: string } {
+  if (id === 'scan') return { phase: 'scan' };
+  if (id.startsWith('decompose')) return { phase: 'decompose' };
+  const [feature, rest = ''] = [id.slice(0, id.indexOf('/')), id.slice(id.indexOf('/') + 1)];
+  const table: [RegExp, Phase][] = [
+    [/^(setup|research|specify$)/, 'specify'],
+    [/^(clarify-|specify-revise)/, 'clarify'],
+    [/^(plan|challenge)/, 'plan'],
+    [/^(tasks|spec-commit|waves)$/, 'tasks'],
+    [/^analyze/, 'analyze'],
+    [/^(T\d+|W\d+\/)/, 'implement'],
+    [/^(converge-|FIX\d+|report$)/, 'converge'],
+  ];
+  const hit = /^F\d+$/.test(feature) ? table.find(([re]) => re.test(rest)) : undefined;
+  if (!hit) throw new Error(`No phase for step ${id}`);
+  return { phase: hit[1], feature };
+}
+
 export function* pipeline(ctx: Ctx): Generator<Step> {
+  for (const step of steps(ctx)) yield Object.assign(step, phaseOf(step.id));
+}
+
+function* steps(ctx: Ctx): Generator<Step> {
   const D = ctx.dir;
   const request = join(D, 'request.md');
 
@@ -278,7 +308,16 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     after: (d) => md('research.md', render.renderResearch(d)),
   });
 
-  // ── clarification rounds
+  // ── spec draft first, then clarify against it (Spec Kit's order: specify → clarify)
+  yield host(`${f.id}/specify`, `${f.id}: write spec`, {
+    instructions: hostInstructions('specify'),
+    inputs: { request: join(ctx.dir, 'request.md'), decomposition: join(ctx.dir, 'decomposition.json'), research: p('research.json') },
+    schema: 'Spec',
+    output: p('spec.json'),
+    after: (d) => md('spec.md', render.renderSpec(d)),
+  });
+
+  // ── clarification rounds against the draft
   const maxRounds = ctx.config.max_clarify_rounds[depth];
   const answered: { round: number; questions: MergedQ[]; answers: Answer[] }[] = [];
   for (let r = 1; r <= maxRounds; r++) {
@@ -290,11 +329,11 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
       schema: 'Questions',
       cwd: wt,
       out: (a) => p(`clarify-${r}.${a}.json`),
-      prompt: () => workerPrompt('questioner', ctx.repo, { ...ctxInputs(), research: readJson(p('research.json')), previous_answers: prior }),
+      prompt: () => workerPrompt('questioner', ctx.repo, { ...ctxInputs(), research: readJson(p('research.json')), spec_draft: readJson(p('spec.json')), previous_answers: prior }),
     });
     yield host(`${f.id}/clarify-${r}-merge`, `${f.id}: merge questions, round ${r}`, {
       instructions: hostInstructions('clarify'),
-      inputs: { questions_claude: p(`clarify-${r}.claude.json`), questions_codex: p(`clarify-${r}.codex.json`), research: p('research.json'), ...answerInputs(FD, r) },
+      inputs: { questions_claude: p(`clarify-${r}.claude.json`), questions_codex: p(`clarify-${r}.codex.json`), spec_draft: p('spec.json'), research: p('research.json'), ...answerInputs(FD, r) },
       schema: 'MergedQuestions',
       output: p(`questions-${r}.json`),
       postprocess: (d) => normalizeQuestions(d),
@@ -302,7 +341,7 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     const qs = readJson<{ questions: MergedQ[] }>(p(`questions-${r}.json`)).questions;
     if (!qs.length) break;
     yield gate(`${f.id}/clarify-${r}-answers`, `${f.id}: answer clarifying questions (round ${r})`, {
-      context: [join(meta.specDir, 'research.md')],
+      context: [join(meta.specDir, 'spec.md'), join(meta.specDir, 'research.md')],
       questions: qs,
       output: p(`answers-${r}.json`),
       after: () => renderDecisionsMd(FD, meta),
@@ -310,15 +349,20 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     answered.push({ round: r, questions: qs, answers: readJson(p(`answers-${r}.json`)).answers });
   }
 
-  // ── spec
-  yield host(`${f.id}/specify`, `${f.id}: write spec`, {
-    instructions: hostInstructions('specify'),
-    inputs: { request: join(ctx.dir, 'request.md'), decomposition: join(ctx.dir, 'decomposition.json'), research: p('research.json'), ...answerInputs(FD) },
-    schema: 'Spec',
-    output: p('spec.json'),
-    after: (d) => md('spec.md', render.renderSpec(d)),
-  });
-  const planInputs = () => ({ feature: f, spec: readJson(p('spec.json')), research: readJson(p('research.json')), decisions: allAnswers(FD) });
+
+  // ── spec revision with the user's answers. Runs made before this order existed (plan already started) skip it.
+  const specFinal = p('spec-final.json');
+  if (answered.length && (exists(specFinal) || !exists(p('plan.claude.json')))) {
+    yield host(`${f.id}/specify-revise`, `${f.id}: revise spec with your answers`, {
+      instructions: hostInstructions('specify-revise'),
+      inputs: { spec_draft: p('spec.json'), ...answerInputs(FD) },
+      schema: 'Spec',
+      output: specFinal,
+      after: (d) => md('spec.md', render.renderSpec(d)),
+    });
+  }
+  const specPath = exists(specFinal) ? specFinal : p('spec.json');
+  const planInputs = () => ({ feature: f, spec: readJson(specPath), research: readJson(p('research.json')), decisions: allAnswers(FD) });
 
   // ── plan: independent → rebuttal → host synthesis (+ escalated decisions)
   yield both(ctx, {
@@ -338,7 +382,7 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
       schema: 'Rebuttal',
       cwd: wt,
       out: (a) => p(`plan-rebuttal.${a}.json`),
-      prompt: (a) => workerPrompt('rebutter', ctx.repo, { spec: readJson(p('spec.json')), your_output: readJson(p(`plan.${a}.json`)), their_output: readJson(p(`plan.${other(a)}.json`)) }),
+      prompt: (a) => workerPrompt('rebutter', ctx.repo, { spec: readJson(specPath), your_output: readJson(p(`plan.${a}.json`)), their_output: readJson(p(`plan.${other(a)}.json`)) }),
     });
   }
   yield* decided(ctx, FD, meta, {
@@ -346,7 +390,7 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     title: `${f.id}: synthesize plan`,
     instructions: hostInstructions('plan'),
     inputs: pick({
-      spec: p('spec.json'),
+      spec: specPath,
       plan_claude: p('plan.claude.json'),
       plan_codex: p('plan.codex.json'),
       rebuttal_claude: quick ? null : p('plan-rebuttal.claude.json'),
@@ -369,13 +413,13 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
       schema: 'Challenge',
       cwd: wt,
       out: (a) => p(`challenge.${a}.json`),
-      prompt: () => workerPrompt('challenger', ctx.repo, { spec: readJson(p('spec.json')), plan: readJson(p('plan.json')).plan, decisions: allAnswers(FD) }),
+      prompt: () => workerPrompt('challenger', ctx.repo, { spec: readJson(specPath), plan: readJson(p('plan.json')).plan, decisions: allAnswers(FD) }),
     });
     yield* decided(ctx, FD, meta, {
       id: `${f.id}/challenge-synthesis`,
       title: `${f.id}: fold in challenge findings`,
       instructions: hostInstructions('challenge'),
-      inputs: { spec: p('spec.json'), plan: p('plan.json'), challenge_claude: p('challenge.claude.json'), challenge_codex: p('challenge.codex.json') },
+      inputs: { spec: specPath, plan: p('plan.json'), challenge_claude: p('challenge.claude.json'), challenge_codex: p('challenge.codex.json') },
       schema: 'ChallengeSynthesis',
       synth: p('challenge-synthesis.json'),
       final: p('plan-final.json'),
@@ -388,7 +432,7 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
   // ── tasks DAG
   yield host(`${f.id}/tasks`, `${f.id}: break plan into tasks`, {
     instructions: hostInstructions('tasks'),
-    inputs: { spec: p('spec.json'), plan: finalPlan },
+    inputs: { spec: specPath, plan: finalPlan },
     schema: 'Tasks',
     output: p('tasks.json'),
     postprocess: (d) => {
@@ -414,7 +458,7 @@ function* feature(ctx: Ctx, f: Feature, prev: Feature | null): Generator<Step> {
     waves: planWaves(tasks, ctx.config.parallel_tasks, (t) => exists(join(FD, 'tasks', t.id, 'base.json'))).map((w) => w.map((t) => t.id)),
   }));
   const waves = readJson<{ waves: string[][] }>(p('waves.json')).waves.map((ids) => ids.map((id) => tasks.find((t) => t.id === id)!));
-  const shared = { ctx, FD, meta, spec: () => readJson(p('spec.json')), plan, tasks };
+  const shared = { ctx, FD, meta, spec: () => readJson(specPath), plan, tasks };
   for (const [i, wave] of waves.entries()) {
     if (wave.length === 1) yield* taskLoop(shared, wave[0], assignment[wave[0].id]);
     else yield* parallelWave(shared, `W${i + 1}`, wave, assignment);
@@ -868,7 +912,7 @@ function renderDecisionsMd(FD: string, meta: FeatureMeta) {
 function renderAll(FD: string, meta: FeatureMeta, finalPlan: string, assignment: Record<string, string>) {
   const w = (n: string, c: string) => writeText(join(meta.specDir, n), c);
   w('research.md', render.renderResearch(readJson(join(FD, 'research.json'))));
-  w('spec.md', render.renderSpec(readJson(join(FD, 'spec.json'))));
+  w('spec.md', render.renderSpec(readJson(join(FD, exists(join(FD, 'spec-final.json')) ? 'spec-final.json' : 'spec.json'))));
   const synth = exists(join(FD, 'challenge-synthesis.json')) ? readJson(join(FD, 'challenge-synthesis.json')) : {};
   const planSynth = readJson(join(FD, 'plan-synthesis.json'));
   w('plan.md', render.renderPlan(readJson(finalPlan).plan, { conflicts: planSynth.conflicts, accepted: synth.accepted, rejected: synth.rejected }));

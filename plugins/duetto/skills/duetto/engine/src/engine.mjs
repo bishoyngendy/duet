@@ -5,11 +5,11 @@ import { runAgent } from './agents/index.mjs';
 import { liveCall } from './live.mjs';
 import { openPanes } from './panes.mjs';
 import { progressNote, startHeartbeat } from './progress.mjs';
-import { pipeline,                     } from './pipeline.mjs';
+import { PHASES, pipeline,                                 } from './pipeline.mjs';
 import { validate } from './schema.mjs';
-import { SCHEMAS,                           } from './schemas.mjs';
+import { SCHEMAS,                                         } from './schemas.mjs';
 import { acquireLock, logEvent, saveState } from './state.mjs';
-import { appendLine, exists, writeJson } from './util.mjs';
+import { appendLine, exists, readJson, topoSort, writeJson } from './util.mjs';
 
 export function locate(ctx     )                                      {
   const done         = [];
@@ -28,7 +28,22 @@ function setStatus(ctx     , status                        , step             , 
 }
 
 /** Advance until a host step, a user gate, completion or failure. */
-export async function advance(ctx     , opts                                                             = {})                                  {
+                                                       
+
+/**
+ * Whether a step lies past `until`: in a later phase of the target feature (or of any feature when none is named),
+ * or in a feature after the target. Earlier features are dependencies of the target, so they always run.
+ */
+export function beyond(ctx     , step      , until       )          {
+  const rank = (p        ) => PHASES.indexOf(p ?? 'scan');
+  if (until.feature && step.feature && step.feature !== until.feature) {
+    const order = topoSort(readJson                         (join(ctx.dir, 'decomposition.json')).features).map((f) => f.id);
+    return order.indexOf(step.feature) > order.indexOf(until.feature);
+  }
+  return rank(step.phase) > rank(until.phase);
+}
+
+export async function advance(ctx     , opts                                                                            = {})                                  {
   const release = acquireLock(ctx.dir);
   let steps = 0;
   let announced = false;
@@ -40,6 +55,13 @@ export async function advance(ctx     , opts                                    
         logEvent(ctx.dir, { type: 'done' });
         ctx.print('✔ run complete');
         return 'done';
+      }
+      if (opts.until && beyond(ctx, step, opts.until)) {
+        const where = `${opts.until.feature ? `${opts.until.feature} ` : ''}${opts.until.phase}`;
+        setStatus(ctx, 'paused', step, `Reached the end of ${where}. Next: ${step.title}`);
+        logEvent(ctx.dir, { type: 'paused', step: step.id, until: opts.until });
+        ctx.print(`⏹ ${where} complete — next is ${step.title}`);
+        return 'paused';
       }
       if (opts.maxSteps !== undefined && steps++ >= opts.maxSteps) {
         setStatus(ctx, 'idle', step);

@@ -78,7 +78,10 @@ When `duetto watch --milestones` exits, run `duetto status --json` and act on `s
    **running** means a runner is alive: just follow it with `duetto watch --milestones` (`--detach` refuses to start
    a second one).
 
-5. **done** → summarise per feature from `duetto status`: branch, worktree, `specs/NNN-*/report.md` (tasks,
+5. **paused** → the run stopped where it was asked to (`--until <phase>`). Summarise what that phase produced
+   (link the `specs/NNN-*/` files) and wait for the user to ask for the next step.
+
+6. **done** → summarise per feature from `duetto status`: branch, worktree, `specs/NNN-*/report.md` (tasks,
    implementer/reviewer, rounds, acceptance). Offer to open PRs (`gh pr create` from the worktree, base = the
    previous feature's branch for stacked features) — only if the user agrees.
 

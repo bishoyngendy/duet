@@ -5,11 +5,11 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createAgents, runAgent } from './agents/index.ts';
 import { DEFAULT_CONFIG, detectChecks, loadConfig, type Depth } from './config.ts';
-import { advance, answer, costSummary, gateView, hostTaskView, locate, submit } from './engine.ts';
+import { advance, answer, costSummary, gateView, hostTaskView, locate, submit, type Until } from './engine.ts';
 import { currentBranch, git, head, repoRoot } from './git.ts';
 import { liveDir } from './live.ts';
 import { openPanes } from './panes.ts';
-import type { Ctx } from './pipeline.ts';
+import { PHASES, type Ctx, type Phase } from './pipeline.ts';
 import { runnerLog, watch } from './watch.ts';
 import { SCHEMAS, type AgentName } from './schemas.ts';
 import { currentRunId, listRuns, loadState, lockHolder, logEvent, migrateLegacy, newRunId, duettoDir, runDir, saveState, setCurrentRun, type RunState } from './state.ts';
@@ -20,7 +20,9 @@ const HELP = `duetto — Claude × Codex spec-driven orchestrator
 Usage:
   duetto init                         Scaffold .duetto/ (config, constitution) in this repo
   duetto start "<idea>" [--depth quick|standard|deep] [--headless] [--no-run] [--detach]
-  duetto run [--headless] [--detach]  Advance the current run until it needs the host or you
+  duetto run [--headless] [--detach] [--until <phase> [--feature F1]]
+                                      Advance the current run until it needs the host or you
+                                      (--until: stop after a phase: specify|clarify|plan|tasks|analyze|implement|converge)
                                       (--detach: in the background, independent of this shell)
   duetto status [--json]              Where the run is, what's pending, cost so far
   duetto next [--json]                The pending host task (synthesis) or questions for you
@@ -74,6 +76,8 @@ export async function main(argv: string[]): Promise<number> {
       compact: { type: 'boolean' },
       milestones: { type: 'boolean' },
       detach: { type: 'boolean' },
+      until: { type: 'string' },
+      feature: { type: 'string' },
     },
   });
 
@@ -90,8 +94,9 @@ export async function main(argv: string[]): Promise<number> {
     }
     case 'run': {
       const ctx = await context(v.run);
-      if (v.detach) return detach(ctx, Boolean(v.headless));
-      return exitFor(await advance(ctx, { headless: v.headless, panes: !v.headless }));
+      const until = parseUntil(v.until, v.feature);
+      if (v.detach) return detach(ctx, Boolean(v.headless), until);
+      return exitFor(await advance(ctx, { headless: v.headless, panes: !v.headless, until }));
     }
     case 'watch': {
       const ctx = await context(v.run);
@@ -169,7 +174,16 @@ const exitFor = (s: RunState['status']) => (s === 'failed' ? 1 : 0);
  * Starts `duetto run` as its own process group with output to live/runner.log, and returns at once. The run
  * then survives the shell or session that started it; `duetto watch --milestones` follows it.
  */
-function detach(ctx: Ctx, headless: boolean): number {
+function parseUntil(phase?: string, feature?: string): Until | undefined {
+  if (!phase) {
+    if (feature) throw new Error('--feature needs --until <phase>');
+    return undefined;
+  }
+  if (!PHASES.includes(phase as Phase)) throw new Error(`--until must be one of: ${PHASES.join(', ')}`);
+  return { phase: phase as Phase, feature };
+}
+
+function detach(ctx: Ctx, headless: boolean, until?: Until): number {
   const holder = lockHolder(ctx.dir);
   if (holder) {
     console.log(`Already running (pid ${holder}). Follow it with: duetto watch --milestones`);
@@ -177,7 +191,14 @@ function detach(ctx: Ctx, headless: boolean): number {
   }
   mkdirSync(liveDir(ctx.dir), { recursive: true });
   const log = openSync(runnerLog(ctx.dir), 'a');
-  const args = [process.argv[1], 'run', '--run', ctx.state.id, ...(headless ? ['--headless'] : [])];
+  const args = [
+    process.argv[1],
+    'run',
+    '--run',
+    ctx.state.id,
+    ...(headless ? ['--headless'] : []),
+    ...(until ? ['--until', until.phase, ...(until.feature ? ['--feature', until.feature] : [])] : []),
+  ];
   const child = spawn(process.execPath, args, { cwd: ctx.repo, detached: true, stdio: ['ignore', log, log], env: process.env });
   // Claim the lock for the child now, so a watcher started right after this sees a live runner.
   writeText(join(ctx.dir, 'run.lock'), String(child.pid));
@@ -273,7 +294,7 @@ function status(ctx: Ctx, json: boolean): number {
   for (const f of features) console.log(`\n  ${f.id} ${f.title}\n     branch   ${f.branch}\n     worktree ${f.worktree}\n     specs    ${f.specDir}`);
   const costLine = Object.entries(costs).map(([a, c]) => `${a}: ${c.calls} calls, ${fmtMs(c.ms)}${c.cost ? `, $${c.cost.toFixed(2)}` : ''}`);
   if (costLine.length) console.log(`\nAgents   ${costLine.join(' · ')}`);
-  const hint = { needs_synthesis: 'duetto next', needs_answers: 'duetto next', idle: 'duetto run', failed: 'duetto run (after fixing the cause)', running: 'duetto log', interrupted: 'duetto run (resumes where it stopped)', done: '' }[ctx.state.status];
+  const hint = { needs_synthesis: 'duetto next', needs_answers: 'duetto next', idle: 'duetto run', failed: 'duetto run (after fixing the cause)', running: 'duetto log', paused: 'duetto run (continues past the phase it stopped at)', interrupted: 'duetto run (resumes where it stopped)', done: '' }[ctx.state.status];
   if (hint) console.log(`\nNext     ${hint}`);
   return 0;
 }

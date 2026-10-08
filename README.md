@@ -24,8 +24,8 @@ $duetto "add checkpoint reminders"        (Codex)
 scan (C∥X) → decompose (host) → ⛔ approve split
 per feature, in dependency order, on a stacked branch + worktree:
   research (C∥X) → rebuttal (C∥X) → synthesis (host)
-  clarify (C∥X) → merge (host) → ⛔ answers        × up to N rounds
-  spec (host)
+  spec draft (host)
+  clarify against the draft (C∥X) → merge (host) → ⛔ answers   × up to N rounds → spec revision (host)
   plan (C∥X) → rebuttal (C∥X) → synthesis (host) → ⛔ escalated conflicts → finalize (host)
   challenge (C∥X) → fold in (host) → ⛔ new ambiguities
   tasks DAG (host) → commit specs/NNN-slug/
@@ -125,7 +125,9 @@ Read-only roles can run commands (tests, probes) but can't write: Claude runs in
 
 ```
 duetto start "<idea>" [--depth quick|standard|deep] [--headless]
-duetto run [--headless]          advance until host/user is needed (re-run after any failure; nothing is redone)
+duetto run [--headless] [--detach] [--until <phase> [--feature F1]]
+                               advance until host/user is needed (re-run after any failure; nothing is redone);
+                               --until stops after specify|clarify|plan|tasks|analyze|implement|converge
 duetto status [--json]
 duetto next [--json]             pending synthesis task or questions
 duetto submit <draft.json>

@@ -4,11 +4,11 @@ import { runAgent } from './agents/index.ts';
 import { liveCall } from './live.ts';
 import { openPanes } from './panes.ts';
 import { progressNote, startHeartbeat } from './progress.ts';
-import { pipeline, type Ctx, type Step } from './pipeline.ts';
+import { PHASES, pipeline, type Ctx, type Phase, type Step } from './pipeline.ts';
 import { validate } from './schema.ts';
-import { SCHEMAS, type Answer, type MergedQ } from './schemas.ts';
+import { SCHEMAS, type Answer, type Feature, type MergedQ } from './schemas.ts';
 import { acquireLock, logEvent, saveState } from './state.ts';
-import { appendLine, exists, writeJson } from './util.ts';
+import { appendLine, exists, readJson, topoSort, writeJson } from './util.ts';
 
 export function locate(ctx: Ctx): { step: Step | null; done: Step[] } {
   const done: Step[] = [];
@@ -27,7 +27,22 @@ function setStatus(ctx: Ctx, status: Ctx['state']['status'], step: Step | null, 
 }
 
 /** Advance until a host step, a user gate, completion or failure. */
-export async function advance(ctx: Ctx, opts: { headless?: boolean; maxSteps?: number; panes?: boolean } = {}): Promise<Ctx['state']['status']> {
+export type Until = { phase: Phase; feature?: string };
+
+/**
+ * Whether a step lies past `until`: in a later phase of the target feature (or of any feature when none is named),
+ * or in a feature after the target. Earlier features are dependencies of the target, so they always run.
+ */
+export function beyond(ctx: Ctx, step: Step, until: Until): boolean {
+  const rank = (p?: Phase) => PHASES.indexOf(p ?? 'scan');
+  if (until.feature && step.feature && step.feature !== until.feature) {
+    const order = topoSort(readJson<{ features: Feature[] }>(join(ctx.dir, 'decomposition.json')).features).map((f) => f.id);
+    return order.indexOf(step.feature) > order.indexOf(until.feature);
+  }
+  return rank(step.phase) > rank(until.phase);
+}
+
+export async function advance(ctx: Ctx, opts: { headless?: boolean; maxSteps?: number; panes?: boolean; until?: Until } = {}): Promise<Ctx['state']['status']> {
   const release = acquireLock(ctx.dir);
   let steps = 0;
   let announced = false;
@@ -39,6 +54,13 @@ export async function advance(ctx: Ctx, opts: { headless?: boolean; maxSteps?: n
         logEvent(ctx.dir, { type: 'done' });
         ctx.print('✔ run complete');
         return 'done';
+      }
+      if (opts.until && beyond(ctx, step, opts.until)) {
+        const where = `${opts.until.feature ? `${opts.until.feature} ` : ''}${opts.until.phase}`;
+        setStatus(ctx, 'paused', step, `Reached the end of ${where}. Next: ${step.title}`);
+        logEvent(ctx.dir, { type: 'paused', step: step.id, until: opts.until });
+        ctx.print(`⏹ ${where} complete — next is ${step.title}`);
+        return 'paused';
       }
       if (opts.maxSteps !== undefined && steps++ >= opts.maxSteps) {
         setStatus(ctx, 'idle', step);

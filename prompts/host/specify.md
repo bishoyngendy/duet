@@ -1,2 +1,2 @@
-# Host step: write the specification
-Write the feature spec from the request, research synthesis and ALL of the user's answers. Requirements and acceptance criteria must be testable and must reflect every decision the user made. Record remaining assumptions explicitly. Do not include implementation details — that is the plan's job.
+# Host step: draft the specification
+Write the feature spec from the request and the research synthesis. This is a DRAFT: clarifying questions about it come next, and their answers will be folded in. Requirements and acceptance criteria must be testable. Where the request is genuinely ambiguous, pick the most reasonable reading and record it under assumptions — those are what the clarification round will probe. Do not include implementation details — that is the plan's job.

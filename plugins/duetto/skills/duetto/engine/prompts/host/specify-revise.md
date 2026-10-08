@@ -1,0 +1,2 @@
+# Host step: revise the spec with the user's answers
+The user answered clarifying questions about the draft spec. Produce the revised spec with every answer applied faithfully: update user stories, requirements, acceptance criteria, edge cases and out-of-scope items they affect, and remove assumptions the answers settled. Keep everything the answers didn't touch exactly as it was. Do not reopen answered questions.

@@ -100,11 +100,11 @@ export type HostScript = (step: Step, base: any) => any;
 export type GateScript = (step: Step) => Record<string, string> | 'suggested';
 
 /** Drive a run to completion, answering host steps and gates with the given scripts. */
-export async function drive(ctx: Ctx, hostScript: HostScript, gateScript: GateScript, maxIterations = 200): Promise<string[]> {
+export async function drive(ctx: Ctx, hostScript: HostScript, gateScript: GateScript, maxIterations = 200, until?: any): Promise<string[]> {
   const visited: string[] = [];
   for (let i = 0; i < maxIterations; i++) {
-    const status = await advance(ctx);
-    if (status === 'done') return visited;
+    const status = await advance(ctx, { until });
+    if (status === 'done' || status === 'paused') return visited;
     if (status === 'failed') throw new Error(`run failed: ${ctx.state.message}`);
     const { step } = locate(ctx);
     if (!step) throw new Error('no step but not done');
