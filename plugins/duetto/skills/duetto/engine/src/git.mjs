@@ -20,7 +20,7 @@ export async function currentBranch(cwd        )                  {
 }
 
 export function worktreePath(repo        , worktreesDir               , runId        , featureId        )         {
-  const root = worktreesDir ?? join(homedir(), '.duet', 'worktrees');
+  const root = worktreesDir ?? join(homedir(), '.duetto', 'worktrees');
   return join(root, `${basename(repo)}-${sha(repo).slice(0, 8)}`, runId, featureId);
 }
 
@@ -72,7 +72,7 @@ export async function commitAll(wt        , message        )                    
   await stageAll(wt);
   const status = await git(wt, 'status', '--porcelain');
   if (!status) return null;
-  // --no-verify: duet runs the project's checks itself before committing.
+  // --no-verify: duetto runs the project's checks itself before committing.
   await git(wt, 'commit', '-q', '--no-verify', '-m', message);
   return head(wt);
 }

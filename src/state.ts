@@ -1,4 +1,4 @@
-import { readdirSync, rmSync } from 'node:fs';
+import { readdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { appendLine, exists, readJson, readText, slugify, writeJson, writeText } from './util.ts';
 import type { Depth } from './config.ts';
@@ -19,8 +19,21 @@ export type RunState = {
   updated_at: string;
 };
 
-export const duetDir = (repo: string) => join(repo, '.duet');
-export const runsDir = (repo: string) => join(duetDir(repo), 'runs');
+export const duettoDir = (repo: string) => join(repo, '.duetto');
+
+/**
+ * One-time move from the pre-rename `.duet/` folder. Runs keep working: their worktree paths are absolute.
+ * Returns true when it migrated.
+ */
+export function migrateLegacy(repo: string): boolean {
+  const legacy = join(repo, '.duet');
+  if (!exists(legacy) || exists(duettoDir(repo))) return false;
+  renameSync(legacy, duettoDir(repo));
+  const gi = join(repo, '.gitignore');
+  if (exists(gi)) writeText(gi, readText(gi).replace(/^# duet$/m, '# duetto').replace(/^\.duet\//gm, '.duetto/'));
+  return true;
+}
+export const runsDir = (repo: string) => join(duettoDir(repo), 'runs');
 export const runDir = (repo: string, id: string) => join(runsDir(repo), id);
 
 export function newRunId(request: string, now = new Date()): string {
@@ -30,12 +43,12 @@ export function newRunId(request: string, now = new Date()): string {
 }
 
 export function currentRunId(repo: string): string | null {
-  const id = readText(join(duetDir(repo), 'current')).trim();
+  const id = readText(join(duettoDir(repo), 'current')).trim();
   return id || null;
 }
 
 export function setCurrentRun(repo: string, id: string): void {
-  writeText(join(duetDir(repo), 'current'), id + '\n');
+  writeText(join(duettoDir(repo), 'current'), id + '\n');
 }
 
 export function listRuns(repo: string): string[] {
@@ -46,7 +59,7 @@ export function loadState(dir: string): RunState {
   const state = readJson<RunState>(join(dir, 'state.json'));
   if (state.status === 'running' && !lockHolder(dir)) {
     state.status = 'interrupted';
-    state.message = 'The process advancing this run is gone (killed, crashed or its session ended). `duet run` resumes it; completed work is kept.';
+    state.message = 'The process advancing this run is gone (killed, crashed or its session ended). `duetto run` resumes it; completed work is kept.';
   }
   return state;
 }
@@ -73,7 +86,7 @@ export function lockHolder(dir: string): number | null {
   }
 }
 
-/** Single-writer lock per run so two `duet run`s never advance the same run concurrently. */
+/** Single-writer lock per run so two `duetto run`s never advance the same run concurrently. */
 export function acquireLock(dir: string): () => void {
   const p = join(dir, 'run.lock');
   const pid = lockHolder(dir);

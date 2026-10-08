@@ -8,32 +8,39 @@ import { advance, answer, costSummary, gateView, hostTaskView, locate, submit } 
 import { currentBranch, git, head, repoRoot } from './git.ts';
 import type { Ctx } from './pipeline.ts';
 import { SCHEMAS, type AgentName } from './schemas.ts';
-import { currentRunId, listRuns, loadState, logEvent, newRunId, duetDir, runDir, saveState, setCurrentRun, type RunState } from './state.ts';
+import { currentRunId, listRuns, loadState, logEvent, migrateLegacy, newRunId, duettoDir, runDir, saveState, setCurrentRun, type RunState } from './state.ts';
 import { exists, fmtMs, readJson, readText, writeJson, writeText } from './util.ts';
 
-const HELP = `duet — Claude × Codex spec-driven orchestrator
+const HELP = `duetto — Claude × Codex spec-driven orchestrator
 
 Usage:
-  duet init                         Scaffold .duet/ (config, constitution) in this repo
-  duet start "<idea>" [--depth quick|standard|deep] [--headless] [--no-run]
-  duet run [--headless]             Advance the current run until it needs the host or you
-  duet status [--json]              Where the run is, what's pending, cost so far
-  duet next [--json]                The pending host task (synthesis) or questions for you
-  duet submit <file.json>           Submit the host's synthesis for the pending step
-  duet answer Q1=A Q2="free text" [--accept-suggested] [--file answers.json]
-  duet log [-n 40]                  Recent events
-  duet runs                         List runs;  duet use <run-id> to switch
-  duet agent-test [--agent claude|codex]   Smoke-test both CLIs (schema output + read-only)
+  duetto init                         Scaffold .duetto/ (config, constitution) in this repo
+  duetto start "<idea>" [--depth quick|standard|deep] [--headless] [--no-run]
+  duetto run [--headless]             Advance the current run until it needs the host or you
+  duetto status [--json]              Where the run is, what's pending, cost so far
+  duetto next [--json]                The pending host task (synthesis) or questions for you
+  duetto submit <file.json>           Submit the host's synthesis for the pending step
+  duetto answer Q1=A Q2="free text" [--accept-suggested] [--file answers.json]
+  duetto log [-n 40]                  Recent events
+  duetto runs                         List runs;  duetto use <run-id> to switch
+  duetto agent-test [--agent claude|codex]   Smoke-test both CLIs (schema output + read-only)
 
 Common flags: --run <id> to target a specific run.
 `;
 
 const stamp = () => new Date().toTimeString().slice(0, 8);
 
-async function context(runId?: string): Promise<Ctx> {
+/** The repo root, after moving a pre-rename `.duet/` folder to `.duetto/`. */
+async function projectRoot(): Promise<string> {
   const repo = await repoRoot(process.cwd());
+  if (migrateLegacy(repo)) console.log('Moved .duet/ to .duetto/ (duet is now Duetto); existing runs carry on.');
+  return repo;
+}
+
+async function context(runId?: string): Promise<Ctx> {
+  const repo = await projectRoot();
   const id = runId ?? currentRunId(repo);
-  if (!id) throw new Error('No current run. Start one with: duet start "<idea>"');
+  if (!id) throw new Error('No current run. Start one with: duetto start "<idea>"');
   const dir = runDir(repo, id);
   if (!exists(join(dir, 'state.json'))) throw new Error(`Run not found: ${id}`);
   const config = loadConfig(repo);
@@ -64,7 +71,7 @@ export async function main(argv: string[]): Promise<number> {
       return init(Boolean(v.force));
     case 'start': {
       const idea = pos.join(' ').trim();
-      if (!idea) throw new Error('Usage: duet start "<idea>"');
+      if (!idea) throw new Error('Usage: duetto start "<idea>"');
       const ctx = await start(idea, (v.depth as Depth) ?? undefined);
       if (v['no-run']) return 0;
       return exitFor(await advance(ctx, { headless: v.headless }));
@@ -76,10 +83,10 @@ export async function main(argv: string[]): Promise<number> {
     case 'next':
       return next(await context(v.run), Boolean(v.json));
     case 'submit': {
-      if (!pos[0]) throw new Error('Usage: duet submit <file.json>');
+      if (!pos[0]) throw new Error('Usage: duetto submit <file.json>');
       const ctx = await context(v.run);
       const step = await submit(ctx, pos[0]);
-      console.log(`✓ accepted ${step.id}. Continue with: duet run`);
+      console.log(`✓ accepted ${step.id}. Continue with: duetto run`);
       return 0;
     }
     case 'answer': {
@@ -92,7 +99,7 @@ export async function main(argv: string[]): Promise<number> {
       }
       const answers = await answer(ctx, given, Boolean(v['accept-suggested']));
       for (const a of answers) console.log(`✓ ${a.id} → ${a.label}`);
-      console.log('Continue with: duet run');
+      console.log('Continue with: duetto run');
       return 0;
     }
     case 'log': {
@@ -102,7 +109,7 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'runs': {
-      const repo = await repoRoot(process.cwd());
+      const repo = await projectRoot();
       const cur = currentRunId(repo);
       for (const id of listRuns(repo)) {
         const s = loadState(runDir(repo, id));
@@ -111,8 +118,8 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'use': {
-      const repo = await repoRoot(process.cwd());
-      if (!pos[0] || !exists(runDir(repo, pos[0]))) throw new Error('Usage: duet use <run-id> (see duet runs)');
+      const repo = await projectRoot();
+      if (!pos[0] || !exists(runDir(repo, pos[0]))) throw new Error('Usage: duetto use <run-id> (see duetto runs)');
       setCurrentRun(repo, pos[0]);
       return 0;
     }
@@ -133,8 +140,8 @@ export async function main(argv: string[]): Promise<number> {
 const exitFor = (s: RunState['status']) => (s === 'failed' ? 1 : 0);
 
 async function init(force: boolean): Promise<number> {
-  const repo = await repoRoot(process.cwd());
-  const dir = duetDir(repo);
+  const repo = await projectRoot();
+  const dir = duettoDir(repo);
   const cfgPath = join(dir, 'config.json');
   const constPath = join(dir, 'constitution.md');
   if (!exists(cfgPath) || force) {
@@ -146,23 +153,23 @@ async function init(force: boolean): Promise<number> {
     console.log(`wrote ${constPath}`);
   }
   const gi = join(repo, '.gitignore');
-  const lines = ['.duet/runs/', '.duet/current', '.duet/host/'];
+  const lines = ['.duetto/runs/', '.duetto/current', '.duetto/host/'];
   const current = readText(gi);
   const missing = lines.filter((l) => !current.split('\n').includes(l));
   if (missing.length) {
-    writeText(gi, current + (current && !current.endsWith('\n') ? '\n' : '') + `# duet\n${missing.join('\n')}\n`);
+    writeText(gi, current + (current && !current.endsWith('\n') ? '\n' : '') + `# duetto\n${missing.join('\n')}\n`);
     console.log('updated .gitignore');
   }
-  console.log('\nReview .duet/config.json (checks.setup / checks.commands) and .duet/constitution.md, then: duet start "<idea>"');
+  console.log('\nReview .duetto/config.json (checks.setup / checks.commands) and .duetto/constitution.md, then: duetto start "<idea>"');
   return 0;
 }
 
 async function start(idea: string, depth?: Depth): Promise<Ctx> {
-  const repo = await repoRoot(process.cwd());
-  if (!exists(join(duetDir(repo), 'config.json'))) await init(false);
+  const repo = await projectRoot();
+  if (!exists(join(duettoDir(repo), 'config.json'))) await init(false);
   const config = loadConfig(repo);
   const dirty = await git(repo, 'status', '--porcelain');
-  if (dirty.split('\n').some((l) => l && !l.includes('.duet') && !l.endsWith('.gitignore'))) {
+  if (dirty.split('\n').some((l) => l && !l.includes('.duetto') && !l.endsWith('.gitignore'))) {
     console.log('⚠ Working tree has uncommitted changes. Worktrees branch from HEAD, so those changes will NOT be visible to the agents.');
   }
   const id = newRunId(idea);
@@ -219,7 +226,7 @@ function status(ctx: Ctx, json: boolean): number {
   for (const f of features) console.log(`\n  ${f.id} ${f.title}\n     branch   ${f.branch}\n     worktree ${f.worktree}\n     specs    ${f.specDir}`);
   const costLine = Object.entries(costs).map(([a, c]) => `${a}: ${c.calls} calls, ${fmtMs(c.ms)}${c.cost ? `, $${c.cost.toFixed(2)}` : ''}`);
   if (costLine.length) console.log(`\nAgents   ${costLine.join(' · ')}`);
-  const hint = { needs_synthesis: 'duet next', needs_answers: 'duet next', idle: 'duet run', failed: 'duet run (after fixing the cause)', running: 'duet log', interrupted: 'duet run (resumes where it stopped)', done: '' }[ctx.state.status];
+  const hint = { needs_synthesis: 'duetto next', needs_answers: 'duetto next', idle: 'duetto run', failed: 'duetto run (after fixing the cause)', running: 'duetto log', interrupted: 'duetto run (resumes where it stopped)', done: '' }[ctx.state.status];
   if (hint) console.log(`\nNext     ${hint}`);
   return 0;
 }
@@ -236,7 +243,7 @@ function next(ctx: Ctx, json: boolean): number {
     else {
       console.log(`◆ HOST STEP: ${view.title}\n\n${view.instructions}\n\nInputs:`);
       for (const [k, p] of Object.entries(view.inputs)) console.log(`  ${k}: ${p}`);
-      console.log(`\nOutput schema: ${view.schema_path}\nWrite your JSON to: ${view.draft_path}\nThen: duet submit ${view.draft_path}`);
+      console.log(`\nOutput schema: ${view.schema_path}\nWrite your JSON to: ${view.draft_path}\nThen: duetto submit ${view.draft_path}`);
     }
     return 0;
   }
@@ -252,20 +259,20 @@ function next(ctx: Ctx, json: boolean): number {
         if (q.codex) console.log(`    Codex  → ${q.codex.recommendation ?? '—'}: ${q.codex.rationale}`);
         console.log('');
       }
-      console.log(`Answer: duet answer ${view.questions.map((q) => `${q.id}=<key|text>`).join(' ')}  [--accept-suggested]`);
+      console.log(`Answer: duetto answer ${view.questions.map((q) => `${q.id}=<key|text>`).join(' ')}  [--accept-suggested]`);
     }
     return 0;
   }
-  console.log(json ? JSON.stringify({ kind: 'engine', step: step.id, title: step.title }) : `● ${step.title} — engine work; run: duet run`);
+  console.log(json ? JSON.stringify({ kind: 'engine', step: step.id, title: step.title }) : `● ${step.title} — engine work; run: duetto run`);
   return 0;
 }
 
 async function agentTest(only?: AgentName): Promise<number> {
-  const config = loadConfig(await repoRoot(process.cwd()).catch(() => process.cwd()));
+  const config = loadConfig(await projectRoot().catch(() => process.cwd()));
   const agents = createAgents(config);
   let failed = 0;
   for (const name of (only ? [only] : ['claude', 'codex']) as AgentName[]) {
-    const cwd = mkdtempSync(join(tmpdir(), `duet-test-${name}-`));
+    const cwd = mkdtempSync(join(tmpdir(), `duetto-test-${name}-`));
     const started = Date.now();
     try {
       const res = await runAgent(agents[name], {

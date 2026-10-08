@@ -1,22 +1,22 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "duet",
+  "name": "duetto",
   "description": "Claude × Codex dual-model orchestration for Claude Code and Codex CLI.",
   "owner": {
     "name": "Bishoy Gendy"
   },
   "plugins": [
     {
-      "name": "duet",
+      "name": "duetto",
       "description": "Dual-model (Claude + Codex) spec-driven workflow: parallel research, clarifying questions, independent plans with rebuttal, adversarial plan challenge, task DAG, and alternating implement/review until converged.",
       "version": "0.1.0",
       "author": {
         "name": "Bishoy Gendy"
       },
-      "source": "./plugins/duet",
+      "source": "./plugins/duetto",
       "category": "development",
-      "homepage": "https://github.com/bishoyngendy/duet",
-      "repository": "https://github.com/bishoyngendy/duet",
+      "homepage": "https://github.com/bishoyngendy/duetto",
+      "repository": "https://github.com/bishoyngendy/duetto",
       "license": "MIT"
     }
   ]

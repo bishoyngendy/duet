@@ -115,7 +115,7 @@ test('full pipeline: research → clarify → plan (escalation) → challenge �
   assert.match(log, /docs\(001\): spec, plan and tasks/);
   assert.match(log, /feat\(001\/T001\): Core/);
   assert.match(log, /feat\(001\/T002\): Wire up/);
-  assert.match(log, /docs\(001\): duet report/);
+  assert.match(log, /docs\(001\): duetto report/);
   for (const f of ['spec.md', 'plan.md', 'tasks.md', 'research.md', 'decisions.md', 'report.md']) {
     assert.ok(existsSync(join(meta.specDir, f)), `${f} exists`);
   }

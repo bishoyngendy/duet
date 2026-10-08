@@ -1,11 +1,11 @@
 {
-  "name": "duet",
+  "name": "duetto",
   "plugins": [
     {
-      "name": "duet",
+      "name": "duetto",
       "source": {
         "source": "local",
-        "path": "./plugins/duet"
+        "path": "./plugins/duetto"
       },
       "policy": {
         "installation": "AVAILABLE",

@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { config, conflict, schema, schemas, util, waves } from './impl.ts';
+import { config, conflict, schema, schemas, state, util, waves } from './impl.ts';
 
 const { bounceConflicts } = conflict;
 const { DEFAULT_CONFIG } = config;
@@ -104,4 +107,16 @@ test('planWaves groups independent disjoint tasks, respecting deps, capacity and
   assert.deepEqual(ids(planWaves(tasks, 2)), [['T1', 'T2'], ['T3', 'T4'], ['T5']]);
   assert.deepEqual(ids(planWaves(tasks, 1)), [['T1'], ['T2'], ['T3'], ['T4'], ['T5']]);
   assert.deepEqual(ids(planWaves(tasks, 3, (x) => x.id === 'T1')), [['T1'], ['T2', 'T3', 'T4'], ['T5']]);
+});
+
+test('a pre-rename .duet/ folder moves to .duetto/ once, with its .gitignore lines', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'duetto-migrate-'));
+  mkdirSync(join(repo, '.duet', 'runs', 'r1'), { recursive: true });
+  writeFileSync(join(repo, '.duet', 'runs', 'r1', 'state.json'), '{}');
+  writeFileSync(join(repo, '.gitignore'), 'node_modules\n# duet\n.duet/runs/\n.duet/current\n');
+  assert.equal(state.migrateLegacy(repo), true);
+  assert.ok(existsSync(join(repo, '.duetto', 'runs', 'r1', 'state.json')));
+  assert.ok(!existsSync(join(repo, '.duet')));
+  assert.equal(readFileSync(join(repo, '.gitignore'), 'utf8'), 'node_modules\n# duetto\n.duetto/runs/\n.duetto/current\n');
+  assert.equal(state.migrateLegacy(repo), false, 'second call is a no-op');
 });

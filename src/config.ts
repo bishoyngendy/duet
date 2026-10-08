@@ -21,7 +21,7 @@ export function resolveAgent(cfg: AgentConfig, role: string): { model: string; e
 export type Config = {
   agents: Record<AgentName, AgentConfig>;
   depth: Depth;
-  /** Agent that performs host steps (synthesis) when `duet run --headless` is used. */
+  /** Agent that performs host steps (synthesis) when `duetto run --headless` is used. */
   synthesizer_fallback: AgentName;
   first_implementer: AgentName;
   /** Max tasks implemented at once, each in its own worktree (independent tasks with disjoint files_in_scope). 1 = serial. */
@@ -78,11 +78,11 @@ function merge<T>(base: T, over: any): T {
 }
 
 export function loadConfig(repo: string): Config {
-  const p = join(repo, '.duet', 'config.json');
+  const p = join(repo, '.duetto', 'config.json');
   return exists(p) ? merge(DEFAULT_CONFIG, readJson(p)) : DEFAULT_CONFIG;
 }
 
-/** Best-effort detection of install/test commands for `duet init`. */
+/** Best-effort detection of install/test commands for `duetto init`. */
 export function detectChecks(repo: string): Config['checks'] {
   const checks: Config['checks'] = { setup: null, commands: [], timeout_minutes: 20 };
   const pkgPath = join(repo, 'package.json');
