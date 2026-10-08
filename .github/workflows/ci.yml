@@ -14,7 +14,7 @@ jobs:
         with: { node-version: '${{ matrix.node }}' }
       - run: git config --global user.email ci@example.com && git config --global user.name ci
       - name: build output is committed and up to date
-        run: node scripts/build.mjs && git diff --exit-code -- plugins/
+        run: node scripts/build.mjs && git status --porcelain -- plugins/ speckit/ && test -z "$(git status --porcelain -- plugins/ speckit/)"
       - run: node --test 'test/*.test.ts'
   built:
     # The engine users install is plain .mjs; verify it on the oldest supported Node too.

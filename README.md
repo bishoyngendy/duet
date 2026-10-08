@@ -113,9 +113,20 @@ codex plugin marketplace add bishoyngendy/duetto      # or a local path
 codex plugin add duetto@duetto
 ```
 
+The plugin gives you `/duetto` (autopilot) plus one skill per phase: `/duetto-specify`, `/duetto-clarify`,
+`/duetto-plan`, `/duetto-tasks`, `/duetto-analyze`, `/duetto-implement`, `/duetto-converge` (`$duetto-…` in Codex).
+
 The repo is both a Claude Code marketplace (`.claude-plugin/marketplace.json`) and a Codex marketplace
-(`.agents/plugins/marketplace.json`). Both point at `plugins/duetto/`, which contains one skill with the engine
-bundled at `skills/duetto/engine/`.
+(`.agents/plugins/marketplace.json`). Both point at `plugins/duetto/`; the engine is bundled at
+`skills/duetto/engine/` and the per-phase skills use it from there.
+
+**Spec Kit extension** (optional, for `/speckit-duetto-plan` etc. alongside Spec Kit's own commands; needs the
+plugin above for the engine):
+```sh
+git clone https://github.com/bishoyngendy/duetto
+specify extension add --dev duetto/speckit/duetto
+```
+It also offers a hook after `/speckit-tasks` to run the dual-model analysis.
 
 Check the setup with `node <skill-dir>/engine/bin/duetto.mjs agent-test`: both CLIs must return valid output, be able to run
 commands, and be unable to write in read-only mode.
@@ -124,7 +135,8 @@ commands, and be unable to write in read-only mode.
 
 ```sh
 sh scripts/install.sh   # dev: links ~/.local/bin/duetto (runs src/*.ts directly) and the skill into both CLIs
-npm run build           # src/*.ts → plugins/duetto/skills/duetto/engine/**/*.mjs (Node's built-in type stripping)
+npm run build           # src/*.ts → plugins/duetto/skills/duetto/engine/**/*.mjs (Node's built-in type stripping),
+                        # plus the per-phase skills and speckit/duetto/ from packaging/commands.json
 npm test                # suite against the sources (Node ≥ 22.18 / 23.6 for type stripping)
 npm run test:built      # same suite against the built engine
 ```
@@ -147,6 +159,9 @@ Other useful settings in `config.json`:
   when their dependencies are done and their `files_in_scope` globs can't overlap; each gets its own worktree (running
   `checks.setup`), and its commit is cherry-picked onto the feature branch. A task that still conflicts is redone on top
   of the merged work. `1` keeps implementation strictly serial.
+- `workspace` (default `worktree`): each feature is built in its own git worktree and branch, leaving your checkout
+  alone. `inplace` builds a `duetto specify` feature the Spec Kit way, on an `NNN-slug` branch in your checkout. The
+  checkout must be clean, duetto commits to it, and you shouldn't edit it while a run is going.
 - `review.blocking` (default `critical/high/medium`) lists severities that force another round even if the reviewer approved.
 - `review.polish` (default `low`) and `review.polish_rounds` (default `1`) control the polish round: when a review approves with these findings, the implementer addresses or disputes them in one extra round. That round is gated by the checks, not re-reviewed; if checks fail it goes back to review.
 - `escalate_categories` lists conflict categories the host may never settle on its own.
